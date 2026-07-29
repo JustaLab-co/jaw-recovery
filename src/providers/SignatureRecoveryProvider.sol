@@ -10,34 +10,22 @@ import { SignatureProofLib } from "../libraries/SignatureProofLib.sol";
  * @title SignatureRecoveryProvider
  *
  * @notice Canonical multichain recovery verifier for JAW accounts: one guardian signature is valid on
- * every chain the account enrolled on. Two guardian classes, dispatched by commitment length:
+ *         every chain the account enrolled on.
  *
- *   - 32-byte commitment (`abi.encode(address)`) — an EOA guardian. The proof is a 64/65-byte ECDSA
- *     signature over the canonical digest, verified with STRICT `ecrecover` only. Deliberately no
- *     ERC-1271/6492 fallback: a smart-account signer's own `isValidSignature` door re-binds
- *     `block.chainid`, which would silently produce per-chain proofs and break the sign-once promise.
- *     A contract address enrolled as a 32-byte commitment is therefore a dead factor that never
- *     verifies — enrollment UIs must reject it.
- *
- *   - 64-byte commitment (`abi.encode(x, y)`) — a raw P-256 passkey public key. The proof is an
- *     ABI-encoded WebAuthn assertion whose challenge is the canonical digest, verified directly in
- *     this provider — byte-for-byte the convention JustanAccount uses for its own passkey owners
- *     (challenge = `abi.encode(digest)`, `requireUserVerification = false`). The guardian's own account
- *     contract is never consulted, so no chain binding applies, and undeployed passkey guardians work
- *     natively with no ERC-6492 dependency.
- *
+ * @dev Two guardian classes, dispatched by commitment length (see {SignatureProofLib} for the shared
+ *      verification core):
+ *        - 32-byte `abi.encode(address)` — an EOA guardian, proven by a 64/65-byte ECDSA signature over
+ *          the canonical digest. A contract address enrolled this way is a dead factor that never
+ *          verifies (no ERC-1271/6492 fallback, by design) — enrollment UIs must reject it.
+ *        - 64-byte `abi.encode(x, y)` — a raw P-256 passkey public key, proven by an ABI-encoded WebAuthn
+ *          assertion. The guardian's own account contract is never consulted, so undeployed passkey
+ *          guardians work natively with no ERC-6492 dependency.
  * @dev The EIP-712 domain deliberately omits `chainId` (`_hashTypedDataSansChainId`): with the
  *      deterministic same-address deployment on every chain, the digest is byte-identical everywhere.
- *      Replay safety is the manager's job — it consumes the ceremony `salt` per chain and enforces
- *      `expiry`; this provider only binds them into the digest. Signature malleability is accepted by
- *      design: a malleated ECDSA twin verifies the same digest, consumes the same salt, and produces
- *      the same request — no state anywhere keys off raw proof bytes. Passkey verification requires the
- *      RIP-7212 precompile or the canonical Solady P256 verifier on the chain (the same dependency
- *      JustanAccount itself has); without both, passkey proofs verify as invalid.
- *
- *      Holds no per-account state: the JustaRecoveryManager owns the commitment registry and passes the
- *      registered commitment in on each `verify` call, so a single deployment backs any number of
- *      guardians for any number of accounts.
+ * @dev Replay safety is the manager's job — it consumes the ceremony `salt` per chain and enforces
+ *      `expiry`; this provider only binds them into the digest.
+ * @dev Holds no per-account state: the manager owns the commitment registry and passes the registered
+ *      commitment in on each `verify` call, so one deployment backs any number of guardians and accounts.
  *
  * @author JustaLab
  */
@@ -48,12 +36,11 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
     ////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice Thrown when the commitment is not a canonical guardian encoding: exactly 32 bytes holding
-     *         a non-zero address (EOA guardian) or exactly 64 bytes (raw passkey public key). Exact
-     *         lengths keep one guardian mapped to exactly one commitment: `abi.decode` ignores trailing
-     *         bytes, so without this check two encodings of the same guardian could register as two
-     *         distinct recoveries and one signature could satisfy both — silently weakening an M-of-N
-     *         threshold.
+     * @notice Thrown when the commitment is not a canonical guardian encoding: exactly 32 bytes holding a
+     *         non-zero address (EOA guardian), or exactly 64 bytes (raw passkey public key).
+     * @dev Exact lengths keep one guardian mapped to exactly one commitment. `abi.decode` ignores trailing
+     *      bytes, so without this check two encodings of the same guardian could register as two distinct
+     *      recoveries and one signature could satisfy both, silently weakening an M-of-N threshold.
      */
     error SignatureRecoveryProvider_InvalidCommitment();
 
@@ -68,8 +55,9 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
     ////////////////////////////////////////////////////////////////////////
 
     /**
-     * @notice EIP-712 typehash for the Recover struct. All guardians of one ceremony sign this same
-     *         message; `salt` and `expiry` are enforced by the manager and only bound here.
+     * @notice EIP-712 typehash for the Recover struct.
+     * @dev All guardians of one ceremony sign this same message; `salt` and `expiry` are enforced by the
+     *      manager and only bound here.
      */
     bytes32 public constant RECOVER_TYPEHASH =
         keccak256("Recover(address account,bytes subject,bytes32 salt,uint256 expiry)");
@@ -104,8 +92,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         bytes32 digest = _recoverDigest(account, subject, salt, expiry);
 
         if (commitment.length == 32) {
-            // EOA guardian — strict ecrecover only (no ERC-1271/6492 fallback so a chain-bound
-            // smart-account envelope can never re-enter this provider); see SignatureProofLib.
+            // EOA guardian: strict ecrecover only, so a chain-bound smart-account envelope can never
+            // re-enter this provider.
             address signer = abi.decode(commitment, (address));
             if (signer == address(0)) {
                 revert SignatureRecoveryProvider_InvalidCommitment();
@@ -114,9 +102,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
                 revert SignatureRecoveryProvider_InvalidSignature();
             }
         } else if (commitment.length == 64) {
-            // Raw passkey guardian — WebAuthn assertion verified directly against the committed public
-            // key, mirroring JustanAccount's own owner verification; see SignatureProofLib. The
-            // guardian's account contract is never consulted.
+            // Raw passkey guardian: WebAuthn assertion verified directly against the committed public key,
+            // so the guardian's own account contract is never consulted.
             (bytes32 x, bytes32 y) = abi.decode(commitment, (bytes32, bytes32));
             if (!SignatureProofLib.isValidPasskeyProof(digest, x, y, proof)) {
                 revert SignatureRecoveryProvider_InvalidSignature();
@@ -133,8 +120,9 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
     /**
      * @notice Compute the chain-agnostic EIP-712 digest the guardians of a ceremony must sign.
      * @dev EOA guardians sign this digest directly; passkey guardians produce a WebAuthn assertion with
-     *      `challenge = abi.encode(digest)`. Identical on every chain (the domain omits chainId and this
-     *      provider deploys at the same deterministic address everywhere).
+     *      `challenge = abi.encode(digest)`.
+     * @dev Identical on every chain (the domain omits chainId and this provider deploys at the same
+     *      deterministic address everywhere).
      * @param account The smart account being recovered.
      * @param subject The new-owner payload.
      * @param salt The ceremony's single-use salt.

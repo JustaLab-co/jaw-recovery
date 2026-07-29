@@ -4,21 +4,17 @@ pragma solidity 0.8.30;
 /**
  * @title IRecoveryManager
  *
- * @notice Per-many-accounts recovery coordinator. A single JustaRecoveryManager singleton serves all
- * JustanAccount instances, so every account-scoped function takes an explicit `account`.
+ * @notice Recovery coordinator serving all JustanAccount instances, so every account-scoped function
+ *         takes an explicit `account`.
  *
- * The unit of recovery is a "recovery": a `(provider, commitment)` pair plus a per-recovery time-lock
- * `delay`. The same provider may back several recoveries for one account (e.g. two ECDSA EOAs, or two
- * committed emails), each with its own delay. The manager owns the recoveries, the per-account used-salt
- * registry, and the approval threshold; providers are stateless verifiers (see {IRecoveryProvider}).
- *
- * Recovery is a two-step time-locked flow built around a "recovery request":
- *   1. `requestRecovery` verifies one proof per recovery for the account's threshold of distinct
- *      recoveries, then queues a `RecoveryRequest` with `executeAt = block.timestamp + maxDelay`, where
- *      `maxDelay` is the largest delay among the approving recoveries (the request is only as fast as its
- *      most-cautious approving factor).
- *   2. After the delay elapses, anyone may call `executeRecoveryRequest` to register the new owner.
- * During the delay window the account itself may call `cancelRecoveryRequest` to abort.
+ * @dev The unit of recovery is a "recovery": a `(provider, commitment)` pair plus a per-recovery
+ *      time-lock `delay`. The same provider may back several recoveries for one account, each with its
+ *      own delay. The manager owns the recoveries, the per-account used-salt registry, and the approval
+ *      threshold; providers are stateless verifiers (see {IRecoveryProvider}).
+ * @dev Recovery is a two-step time-locked flow: `requestRecovery` verifies one proof per recovery for the
+ *      account's threshold of distinct recoveries and queues a request at `block.timestamp + maxDelay`
+ *      (the largest delay among the approving recoveries), then `executeRecoveryRequest` registers the new
+ *      owner once that delay elapses. The account may `cancelRecoveryRequest` during the window.
  *
  * @author JustaLab
  */
@@ -34,9 +30,9 @@ interface IRecoveryManager {
     error JustaRecoveryManager_ZeroProvider();
 
     /**
-     * @notice Thrown when the provider address has no contract code (e.g. an EOA or a typo). Checking at
-     *         registration moves the failure here, while the account can still fix it, rather than to
-     *         recovery time when the account is locked out.
+     * @notice Thrown when the provider address has no contract code (e.g. an EOA or a typo).
+     * @dev Checked at registration so the failure surfaces while the account can still fix it, rather
+     *      than at recovery time when the account is locked out.
      * @param provider The offending provider address.
      */
     error JustaRecoveryManager_ProviderNotContract(address provider);
@@ -47,9 +43,9 @@ interface IRecoveryManager {
     error JustaRecoveryManager_EmptyCommitment();
 
     /**
-     * @notice Thrown when the recovery manager is not registered as an owner of `account`: either the
-     *         account never opted in (never called `addOwnerAddress(address(manager))`), or it was later
-     *         removed as an owner.
+     * @notice Thrown when the recovery manager is not registered as an owner of `account`.
+     * @dev Either the account never opted in (never called `addOwnerAddress(address(manager))`), or the
+     *      manager was later removed as an owner.
      * @param account The smart account.
      */
     error JustaRecoveryManager_ManagerNotAccountOwner(address account);
@@ -103,8 +99,9 @@ interface IRecoveryManager {
     error JustaRecoveryManager_InvalidApprovalCount(uint256 submitted, uint256 required);
 
     /**
-     * @notice Thrown when the ceremony's `expiry` has passed at request time. Expiry bounds how long
-     *         unused guardian proofs stay usable; it has no effect on a request once queued.
+     * @notice Thrown when the ceremony's `expiry` has passed at request time.
+     * @dev Expiry bounds how long unused guardian proofs stay usable; it has no effect on a request once
+     *      queued.
      * @param expiry The expired ceremony deadline.
      */
     error JustaRecoveryManager_ProofsExpired(uint256 expiry);
@@ -116,26 +113,26 @@ interface IRecoveryManager {
     error JustaRecoveryManager_InvalidSubjectLength(uint256 length);
 
     /**
-     * @notice Thrown when a 32-byte `subject` does not fit in an `address` (dirty upper bits). Validated
-     *         at request so `executeRecoveryRequest`'s `abi.decode(subject, (address))` cannot revert
-     *         after the delay has elapsed.
+     * @notice Thrown when a 32-byte `subject` does not fit in an `address` (dirty upper bits).
+     * @dev Validated at request so `executeRecoveryRequest`'s `abi.decode(subject, (address))` cannot
+     *      revert after the delay has elapsed.
      * @param subject The offending subject.
      */
     error JustaRecoveryManager_InvalidSubject(bytes subject);
 
     /**
      * @notice Thrown when the ceremony's `salt` was already consumed for `account` on this chain.
-     *         Consumption makes a ceremony's proofs single-use per chain; other chains consume the same
-     *         salt independently.
+     * @dev Consumption makes a ceremony's proofs single-use per chain; other chains consume the same salt
+     *      independently.
      * @param account The smart account.
      * @param salt The already-consumed salt.
      */
     error JustaRecoveryManager_SaltAlreadyUsed(address account, bytes32 salt);
 
     /**
-     * @notice Thrown when `subject` is already an owner of the account at request time. A best-effort
-     *         fail-fast: the owner set can change during the delay, so this does not guarantee
-     *         `executeRecoveryRequest` won't later revert with `MultiOwnable_AlreadyOwner`.
+     * @notice Thrown when `subject` is already an owner of the account at request time.
+     * @dev A best-effort fail-fast: the owner set can change during the delay, so this does not guarantee
+     *      `executeRecoveryRequest` won't later revert with `MultiOwnable_AlreadyOwner`.
      * @param subject The new-owner payload that is already registered.
      */
     error JustaRecoveryManager_SubjectAlreadyOwner(bytes subject);
@@ -154,12 +151,12 @@ interface IRecoveryManager {
     error JustaRecoveryManager_RequestNotReady(bytes32 requestId, uint64 executeAt);
 
     /**
-     * @notice Thrown when `executeRecoveryRequest` targets an account with no code. Without this guard
-     *         the owner-add calls (which return nothing, so Solidity emits no code-existence check)
-     *         would succeed vacuously against a codeless address — deleting the request and emitting
-     *         success while registering no owner. Unreachable for CREATE2 accounts (code never
-     *         disappears); reachable for an EIP-7702 account whose key holder revoked the delegation
-     *         during the time-lock.
+     * @notice Thrown when `executeRecoveryRequest` targets an account with no code.
+     * @dev The owner-add calls return nothing, so Solidity emits no code-existence check; without this
+     *      guard they would succeed vacuously against a codeless address, deleting the request and
+     *      emitting success while registering no owner.
+     * @dev Unreachable for CREATE2 accounts (code never disappears); reachable for an EIP-7702 account
+     *      whose key holder revoked the delegation during the time-lock.
      * @param account The codeless account.
      */
     error JustaRecoveryManager_AccountHasNoCode(address account);
@@ -170,16 +167,16 @@ interface IRecoveryManager {
     error JustaRecoveryManager_EmptyAdminOps();
 
     /**
-     * @notice Thrown when an admin op's `opType` is not a member of {AdminOpType}. Reverts the whole
-     *         batch (atomic application).
+     * @notice Thrown when an admin op's `opType` is not a member of {AdminOpType}.
+     * @dev Reverts the whole batch (ops are applied atomically).
      * @param opType The unknown op type.
      */
     error JustaRecoveryManager_InvalidAdminOp(uint8 opType);
 
     /**
-     * @notice Thrown when the admin signer identified by `ownerBytes` is not a current owner of the
-     *         account. Checked at submission time on each chain, so signatures from a since-removed
-     *         owner die automatically.
+     * @notice Thrown when the admin signer identified by `ownerBytes` is not a current owner of the account.
+     * @dev Checked at submission time on each chain, so signatures from a since-removed owner die
+     *      automatically.
      * @param account The smart account.
      * @param ownerBytes The rejected signer, in canonical MultiOwnable owner-bytes form.
      */
@@ -206,14 +203,14 @@ interface IRecoveryManager {
 
     /**
      * @notice One admin operation inside a signed `RecoveryAdmin` batch.
-     * @dev `opType` is deliberately a `uint8` rather than the enum so the struct matches the signed
-     *      EIP-712 type exactly (EIP-712 has no enum type) and an out-of-range value reaches the
-     *      manager's own `InvalidAdminOp` revert instead of an ABI-decoding panic. `data` encodings by
-     *      op type:
-     *        ADD_RECOVERY    → `abi.encode(address provider, bytes commitment, uint32 delay)`
-     *        REMOVE_RECOVERY → `abi.encode(bytes32 recoveryId)`
-     *        SET_THRESHOLD   → `abi.encode(uint256 threshold)`
-     *        CANCEL_REQUEST  → `abi.encode(bytes32 requestId)`
+     * @dev `opType` is a `uint8` rather than the enum so the struct matches the signed EIP-712 type exactly
+     *      (EIP-712 has no enum type) and an out-of-range value reaches the manager's own `InvalidAdminOp`
+     *      revert instead of an ABI-decoding panic.
+     * @dev `data` encodings by op type:
+     *        ADD_RECOVERY    => `abi.encode(address provider, bytes commitment, uint32 delay)`
+     *        REMOVE_RECOVERY => `abi.encode(bytes32 recoveryId)`
+     *        SET_THRESHOLD   => `abi.encode(uint256 threshold)`
+     *        CANCEL_REQUEST  => `abi.encode(bytes32 requestId)`
      */
     struct AdminOp {
         uint8 opType;
@@ -221,8 +218,8 @@ interface IRecoveryManager {
     }
 
     /**
-     * @notice A registered recovery: a provider paired with a commitment it verifies against, plus the
-     *         time-lock delay applied when this recovery participates in a request.
+     * @notice A registered recovery: a provider, the commitment it verifies against, and the time-lock
+     *         delay applied when this recovery participates in a request.
      */
     struct Recovery {
         address provider;
@@ -244,8 +241,8 @@ interface IRecoveryManager {
      * @notice A queued recovery request awaiting execution.
      * @dev `account == address(0)` is the sentinel for "not present": a request is only written for an
      *      account that registered a recovery, and registration requires `msg.sender == account`, so
-     *      `address(0)` can never be the subject of a request. The implementation packs `account`
-     *      (20 bytes) and `executeAt` (8 bytes) into one storage slot.
+     *      `address(0)` can never be the subject of a request.
+     * @dev The implementation packs `account` (20 bytes) and `executeAt` (8 bytes) into one storage slot.
      */
     struct RecoveryRequest {
         address account;
@@ -258,10 +255,9 @@ interface IRecoveryManager {
     ////////////////////////////////////////////////////////////////////////
 
     /**
-     * @dev Events reference recoveries by `recoveryId` only. A `recoveryId` is `keccak256` of its
-     *      `(account, provider, commitment)` and is not reversible on-chain; resolve it to a provider/commitment via
-     *      `getRecoveries(account)` (current registrations). Callers that need the preimage of a removed
-     *      recovery must retain it off-chain at `addRecovery` time.
+     * @dev Events reference recoveries by `recoveryId` only, which is not reversible on-chain; resolve it
+     *      via `getRecoveries(account)`. Callers that need the preimage of a removed recovery must retain
+     *      it off-chain at `addRecovery` time.
      */
     event RecoveryAdded(address indexed account, uint32 delay, bytes32 indexed recoveryId);
     event RecoveryRemoved(address indexed account, bytes32 indexed recoveryId);
@@ -281,9 +277,10 @@ interface IRecoveryManager {
 
     /**
      * @notice Register a recovery for an account.
-     * @dev Callable only by the account. The same `provider` may be registered with different
-     *      `commitment`s. Reverts if the `(provider, commitment)` recovery already exists. To change a
-     *      recovery's `delay`, remove it and add it again.
+     * @dev Callable only by the account.
+     * @dev The same `provider` may be registered with different `commitment`s. Reverts if the
+     *      `(provider, commitment)` recovery already exists.
+     * @dev To change a recovery's `delay`, remove it and add it again.
      * @param account The smart account.
      * @param provider The recovery provider (a stateless verifier); must be a contract.
      * @param commitment Provider-specific commitment bytes (e.g. `abi.encode(eoa)`, an email hash).
@@ -302,8 +299,9 @@ interface IRecoveryManager {
 
     /**
      * @notice Unregister a recovery for an account.
-     * @dev Callable only by the account. Rejected if it would drop the recovery count below the threshold,
-     *      unless it removes the last recovery (a full opt-out to zero).
+     * @dev Callable only by the account.
+     * @dev Rejected if it would drop the recovery count below the threshold, unless it removes the last
+     *      recovery (a full opt-out to zero).
      * @param account The smart account.
      * @param recoveryId The recovery id to remove (`keccak256(abi.encode(account, provider, commitment))`).
      */
@@ -318,19 +316,20 @@ interface IRecoveryManager {
     function setRecoveryThreshold(address account, uint256 threshold) external;
 
     /**
-     * @notice Execute a batch of admin operations authorized by a chain-agnostic signature from a
-     *         current owner of `account` — the multichain door. The `onlyAccount` functions above remain
-     *         the single-chain door; both apply the identical internal logic.
+     * @notice Execute a batch of admin operations authorized by a chain-agnostic signature from a current
+     *         owner of `account` — the multichain door.
      * @dev Unrestricted caller; the owner signature carries authorization, so a relayer can fan the same
-     *      bytes out to every chain. The signed digest omits `chainId` (manager deploys at the same
-     *      deterministic address on every chain) and binds `(account, ops, salt, expiry)`; see
-     *      `recoveryAdminDigest`. `salt` shares the ceremony registry: single-use per chain, reusable
-     *      across chains until `expiry`. The signer must be a CURRENT owner of `account` in canonical
-     *      owner-bytes form — 32-byte `abi.encode(address)` (EOA, strict ecrecover) or 64-byte
-     *      `abi.encode(x, y)` (raw passkey, direct WebAuthn). A smart-account owner cannot sign
-     *      chain-agnostically (its ERC-1271 door binds chainId) and must use the account door instead.
-     *      Ops are applied in order, atomically: any failing op (including an unknown `opType`) reverts
-     *      the whole batch on this chain.
+     *      bytes out to every chain. The `onlyAccount` functions above remain the single-chain door; both
+     *      apply the identical internal logic.
+     * @dev The signed digest omits `chainId` (the manager deploys at the same deterministic address on
+     *      every chain) and binds `(account, ops, salt, expiry)`; see `recoveryAdminDigest`.
+     * @dev `salt` shares the ceremony registry: single-use per chain, reusable across chains until `expiry`.
+     * @dev The signer must be a CURRENT owner of `account` in canonical owner-bytes form — 32-byte
+     *      `abi.encode(address)` (EOA, strict ecrecover) or 64-byte `abi.encode(x, y)` (raw passkey,
+     *      direct WebAuthn). A smart-account owner cannot sign chain-agnostically (its ERC-1271 door binds
+     *      chainId) and must use the account door instead.
+     * @dev Ops are applied in order, atomically: any failing op (including an unknown `opType`) reverts the
+     *      whole batch on this chain.
      * @param account The smart account whose recovery configuration is administered.
      * @param ops The ordered admin operations (see {AdminOp} for per-type `data` encodings).
      * @param salt The batch's single-use salt (random 32 bytes chosen off-chain).
@@ -357,10 +356,10 @@ interface IRecoveryManager {
      *         new owner.
      * @dev Unrestricted caller; the proofs carry authorization. Requires exactly
      *      `recoveryThreshold(account)` distinct, registered recoveries, each verifying a proof over the
-     *      same `(subject, salt, expiry)` ceremony. `subject` must be a 32-byte EOA owner or a 64-byte
-     *      passkey owner. `salt` must be unused for the account on this chain and is consumed on success,
-     *      making the proofs single-use per chain; the same ceremony stays submittable on other chains.
-     *      Reverts once `expiry` has passed. The queued `executeAt` uses the largest delay among the
+     *      same `(subject, salt, expiry)` ceremony.
+     * @dev `salt` must be unused for the account on this chain and is consumed on success, making the
+     *      proofs single-use per chain; the same ceremony stays submittable on other chains.
+     * @dev Reverts once `expiry` has passed. The queued `executeAt` uses the largest delay among the
      *      approving recoveries.
      * @param account The smart account to recover.
      * @param subject ABI-encoded new owner: `abi.encode(address)` (32B) or `abi.encode(bytes32 x, bytes32 y)` (64B).
@@ -383,8 +382,8 @@ interface IRecoveryManager {
     /**
      * @notice Finalize a queued recovery request whose delay has elapsed.
      * @dev Unrestricted caller. Registers the new owner from `subject` — a 64-byte passkey via
-     *      `addOwnerPublicKey`, or a 32-byte EOA via `addOwnerAddress`. Reverts if the request is not
-     *      pending or its `executeAt` has not yet been reached.
+     *      `addOwnerPublicKey`, or a 32-byte EOA via `addOwnerAddress`.
+     * @dev Reverts if the request is not pending or its `executeAt` has not yet been reached.
      * @param requestId The id returned from `requestRecovery`.
      */
     function executeRecoveryRequest(bytes32 requestId) external;
@@ -444,17 +443,18 @@ interface IRecoveryManager {
     function recoveryThreshold(address account) external view returns (uint256);
 
     /**
-     * @notice Whether `salt` has been consumed for `account` on this chain. A salt is consumed by a
-     *         successful `requestRecovery` and can never queue again here; the same ceremony stays
-     *         submittable on chains that have not consumed it.
+     * @notice Whether `salt` has been consumed for `account` on this chain.
+     * @dev A salt is consumed by a successful `requestRecovery` and can never queue again here; the same
+     *      ceremony stays submittable on chains that have not consumed it.
      */
     function isSaltUsed(address account, bytes32 salt) external view returns (bool);
 
     /**
      * @notice Compute the chain-agnostic EIP-712 digest an owner must sign to authorize an admin batch.
      * @dev EOA owners sign this digest directly; passkey owners produce a WebAuthn assertion with
-     *      `challenge = abi.encode(digest)`. Identical on every chain (the domain omits chainId and the
-     *      manager deploys at the same deterministic address everywhere).
+     *      `challenge = abi.encode(digest)`.
+     * @dev Identical on every chain (the domain omits chainId and the manager deploys at the same
+     *      deterministic address everywhere).
      * @param account The smart account whose recovery configuration is administered.
      * @param ops The ordered admin operations.
      * @param salt The batch's single-use salt.
