@@ -37,7 +37,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
 
     /**
      * @notice Thrown when the commitment is not a canonical guardian encoding: exactly 32 bytes holding a
-     *         non-zero address (EOA guardian), or exactly 64 bytes (raw passkey public key).
+     *         non-zero address with clean upper bits (EOA guardian), or exactly 64 bytes (raw passkey
+     *         public key).
      * @dev Exact lengths keep one guardian mapped to exactly one commitment. `abi.decode` ignores trailing
      *      bytes, so without this check two encodings of the same guardian could register as two distinct
      *      recoveries and one signature could satisfy both, silently weakening an M-of-N threshold.
@@ -93,12 +94,15 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
 
         if (commitment.length == 32) {
             // EOA guardian: strict ecrecover only, so a chain-bound smart-account envelope can never
-            // re-enter this provider.
-            address signer = abi.decode(commitment, (address));
-            if (signer == address(0)) {
+            // re-enter this provider. The range check keeps the typed error for a non-canonical
+            // registration (zero or dirty upper bits) instead of a raw `abi.decode` panic.
+            uint256 word = uint256(abi.decode(commitment, (bytes32)));
+            if (word == 0 || word > type(uint160).max) {
                 revert SignatureRecoveryProvider_InvalidCommitment();
             }
-            if (!SignatureProofLib.isValidEoaProof(digest, signer, proof)) {
+            // Safe: `word` is range-checked to fit `uint160` above.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            if (!SignatureProofLib.isValidEoaProof(digest, address(uint160(word)), proof)) {
                 revert SignatureRecoveryProvider_InvalidSignature();
             }
         } else if (commitment.length == 64) {
@@ -140,6 +144,34 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         returns (bytes32)
     {
         return _recoverDigest(account, subject, salt, expiry);
+    }
+
+    /**
+     * @notice EIP-5267 domain descriptor, overridden to report the domain actually signed over.
+     * @dev Solady's default advertises a chainId-bound domain, but every digest this contract verifies is
+     *      built sans chainId — tooling that autodiscovers the domain via EIP-5267 would otherwise build
+     *      digests that can never verify. `fields = 0x0b` (`0b01011`) = name, version, verifyingContract.
+     */
+    function eip712Domain()
+        public
+        view
+        override
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        fields = hex"0b";
+        (name, version) = _domainNameAndVersion();
+        chainId = 0; // Deliberately absent from the domain (multichain digests).
+        verifyingContract = address(this);
+        salt = salt; // `bytes32(0)`.
+        extensions = extensions; // `new uint256[](0)`.
     }
 
     ////////////////////////////////////////////////////////////////////////

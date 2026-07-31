@@ -78,10 +78,11 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     mapping(address account => uint256 threshold) internal _recoveryThreshold;
 
     /**
-     * @notice Per-account registry of consumed ceremony salts.
-     * @dev A salt is bound into every proof and consumed on a successful request, which makes the
-     *      ceremony's proofs single-use on this chain while the same proofs stay submittable on chains that
-     *      have not consumed the salt. Also seeds the deterministic `requestId`.
+     * @notice Per-account registry of consumed salts — one namespace shared by recovery ceremonies and
+     *         signed admin batches.
+     * @dev A salt is bound into every proof of its ceremony or admin batch and consumed on success, which
+     *      makes the authorization single-use on this chain while the same bytes stay submittable on chains
+     *      that have not consumed the salt. A ceremony's salt also seeds its deterministic `requestId`.
      */
     mapping(address account => mapping(bytes32 salt => bool used)) internal _usedSalts;
 
@@ -504,6 +505,34 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
         return _recoveryRequests[requestId];
     }
 
+    /**
+     * @notice EIP-5267 domain descriptor, overridden to report the domain actually signed over.
+     * @dev Solady's default advertises a chainId-bound domain, but every digest this contract verifies is
+     *      built sans chainId — tooling that autodiscovers the domain via EIP-5267 would otherwise build
+     *      digests that can never verify. `fields = 0x0b` (`0b01011`) = name, version, verifyingContract.
+     */
+    function eip712Domain()
+        public
+        view
+        override
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
+        fields = hex"0b";
+        (name, version) = _domainNameAndVersion();
+        chainId = 0; // Deliberately absent from the domain (multichain digests).
+        verifyingContract = address(this);
+        salt = salt; // `bytes32(0)`.
+        extensions = extensions; // `new uint256[](0)`.
+    }
+
     ////////////////////////////////////////////////////////////////////////
     // INTERNAL HELPERS
     ////////////////////////////////////////////////////////////////////////
@@ -671,18 +700,25 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     }
 
     /**
-     * @dev Validate a subject at request time so `executeRecoveryRequest` cannot revert on it after the
-     *      delay.
-     * @dev A 32-byte subject must fit in an `address` (clean upper bits) so the execute-time
-     *      `abi.decode(subject, (address))` succeeds; mirrors `MultiOwnable._initializeOwners`.
-     * @dev A 64-byte subject needs no content check — any `(x, y)` decodes and registers without reverting.
+     * @dev Validate a subject at request time so `executeRecoveryRequest` cannot revert on it — or
+     *      vacuously succeed by registering an unusable owner — after the delay, burning single-use proofs.
+     * @dev A 32-byte subject must be a non-zero address with clean upper bits so the execute-time
+     *      `abi.decode(subject, (address))` succeeds; extends `MultiOwnable._initializeOwners` with the
+     *      zero check (the account rejects signatures recovering to `address(0)`, so that owner is dead).
+     * @dev A 64-byte subject must not be the all-zero public key (P256 rejects it, so that owner is dead);
+     *      any other `(x, y)` decodes and registers without reverting.
      */
     function _validateSubject(bytes calldata subject) internal pure {
         if (subject.length == 64) {
+            (bytes32 x, bytes32 y) = abi.decode(subject, (bytes32, bytes32));
+            if (x == 0 && y == 0) {
+                revert JustaRecoveryManager_InvalidSubject(subject);
+            }
             return;
         }
         if (subject.length == 32) {
-            if (uint256(abi.decode(subject, (bytes32))) > type(uint160).max) {
+            uint256 word = uint256(abi.decode(subject, (bytes32)));
+            if (word == 0 || word > type(uint160).max) {
                 revert JustaRecoveryManager_InvalidSubject(subject);
             }
             return;

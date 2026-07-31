@@ -113,9 +113,10 @@ interface IRecoveryManager {
     error JustaRecoveryManager_InvalidSubjectLength(uint256 length);
 
     /**
-     * @notice Thrown when a 32-byte `subject` does not fit in an `address` (dirty upper bits).
-     * @dev Validated at request so `executeRecoveryRequest`'s `abi.decode(subject, (address))` cannot
-     *      revert after the delay has elapsed.
+     * @notice Thrown when `subject` is content-invalid: a 32-byte subject that is zero or does not fit in
+     *         an `address` (dirty upper bits), or a 64-byte subject that is the all-zero public key.
+     * @dev Validated at request so `executeRecoveryRequest` cannot revert — or silently register an owner
+     *      that can never sign — after the delay has elapsed.
      * @param subject The offending subject.
      */
     error JustaRecoveryManager_InvalidSubject(bytes subject);
@@ -239,9 +240,9 @@ interface IRecoveryManager {
 
     /**
      * @notice A queued recovery request awaiting execution.
-     * @dev `account == address(0)` is the sentinel for "not present": a request is only written for an
-     *      account that registered a recovery, and registration requires `msg.sender == account`, so
-     *      `address(0)` can never be the subject of a request.
+     * @dev `account == address(0)` is the sentinel for "not present": every path that writes a request
+     *      first staticcalls the account (`isOwnerBytes` / `isOwnerAddress`), which reverts for the
+     *      codeless zero address, so `address(0)` can never be the subject of a request.
      * @dev The implementation packs `account` (20 bytes) and `executeAt` (8 bytes) into one storage slot.
      */
     struct RecoveryRequest {
@@ -277,7 +278,8 @@ interface IRecoveryManager {
 
     /**
      * @notice Register a recovery for an account.
-     * @dev Callable only by the account.
+     * @dev Callable only by the account, which must have opted in by registering this manager as an owner
+     *      (`addOwnerAddress(address(this))`) before recoveries can be added.
      * @dev The same `provider` may be registered with different `commitment`s. Reverts if the
      *      `(provider, commitment)` recovery already exists.
      * @dev To change a recovery's `delay`, remove it and add it again.
