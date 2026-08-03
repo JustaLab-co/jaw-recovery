@@ -3,6 +3,9 @@ pragma solidity 0.8.30;
 
 import { Script } from "forge-std/Script.sol";
 
+import { Base64 } from "solady/utils/Base64.sol";
+import { WebAuthn } from "solady/utils/WebAuthn.sol";
+
 import { IRecoveryManager } from "../src/interfaces/IRecoveryManager.sol";
 import { SignatureRecoveryProvider } from "../src/providers/SignatureRecoveryProvider.sol";
 import { CodeConstants } from "./HelperConfig.s.sol";
@@ -129,6 +132,43 @@ contract PrepareRecovery is Script, CodeConstants {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         bytes32 vs = bytes32(uint256(s) | (uint256(v - 27) << 255));
         return abi.encodePacked(r, vs);
+    }
+
+    /**
+     * @notice Produces an ABI-encoded WebAuthn assertion over `digest`, signed by `passkeyPk`.
+     * @dev The challenge is `abi.encode(digest)` — the convention both recovery contracts and
+     *      JustanAccount's own owner verification use. `s` is normalized to low-s, which the P-256
+     *      verifier requires.
+     * @param digest The digest to assert over (the WebAuthn challenge).
+     * @param passkeyPk The P-256 private key producing the assertion.
+     * @return proof The ABI-encoded `WebAuthnAuth`.
+     */
+    function signWebAuthnProof(bytes32 digest, uint256 passkeyPk) public pure returns (bytes memory proof) {
+        bytes memory authenticatorData = hex"49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d97630500000000";
+        string memory clientDataJSON = string(
+            abi.encodePacked(
+                '{"type":"webauthn.get","challenge":"',
+                Base64.encode(abi.encode(digest), true, true),
+                '","origin":"https://keys.jaw.id","crossOrigin":false}'
+            )
+        );
+        bytes32 messageHash = sha256(abi.encodePacked(authenticatorData, sha256(bytes(clientDataJSON))));
+
+        (bytes32 r, bytes32 s) = vm.signP256(passkeyPk, messageHash);
+        if (uint256(s) > P256_CURVE_ORDER / 2) {
+            s = bytes32(P256_CURVE_ORDER - uint256(s));
+        }
+
+        return abi.encode(
+            WebAuthn.WebAuthnAuth({
+                authenticatorData: authenticatorData,
+                clientDataJSON: clientDataJSON,
+                typeIndex: 1,
+                challengeIndex: 23,
+                r: r,
+                s: s
+            })
+        );
     }
 
     /**
