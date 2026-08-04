@@ -243,4 +243,33 @@ contract PrepareRecovery is Script, CodeConstants {
         return abi.encodePacked(r, s, v);
     }
 
+    /**
+     * @notice Produces an ABI-encoded WebAuthn admin proof from `passkeyPk` over the manager's
+     *         chain-agnostic EIP-712 digest for `(account, ops, salt, expiry)`.
+     * @dev The passkey counterpart of `signAdminProof`: a passkey owner cannot sign the digest directly, so
+     *      it produces a WebAuthn assertion whose challenge is the admin digest, which the manager verifies
+     *      against the owner's raw `(x, y)` bytes with no account contract in the loop.
+     * @param manager The recovery manager whose domain the proof is bound to.
+     * @param account The smart account whose recovery configuration is administered.
+     * @param ops The ordered admin operations.
+     * @param salt The batch's single-use salt.
+     * @param expiry The signature's expiry timestamp.
+     * @param passkeyPk The P-256 signing key (a passkey owner's key of the account for a valid proof).
+     * @return proof The ABI-encoded `WebAuthnAuth`.
+     */
+    function signAdminProofPasskey(
+        IRecoveryManager manager,
+        address account,
+        IRecoveryManager.AdminOp[] memory ops,
+        bytes32 salt,
+        uint256 expiry,
+        uint256 passkeyPk
+    )
+        public
+        view
+        returns (bytes memory proof)
+    {
+        return signWebAuthnProof(manager.recoveryAdminDigest(account, ops, salt, expiry), passkeyPk);
+    }
+
 }

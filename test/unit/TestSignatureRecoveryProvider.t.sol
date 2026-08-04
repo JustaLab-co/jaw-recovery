@@ -3,9 +3,7 @@ pragma solidity 0.8.30;
 
 import { Test } from "forge-std/Test.sol";
 
-import { Base64 } from "solady/utils/Base64.sol";
 import { P256 } from "solady/utils/P256.sol";
-import { WebAuthn } from "solady/utils/WebAuthn.sol";
 
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
 import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
@@ -44,40 +42,6 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         bytes32 structHash =
             keccak256(abi.encode(provider.RECOVER_TYPEHASH(), account, keccak256(subject), salt, expiry));
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
-    }
-
-    /// @dev Builds a genuine WebAuthn assertion over `digest` signed by `PASSKEY_PK`, ABI-encoded as the
-    ///      `WebAuthnAuth` proof the provider expects. Challenge = `abi.encode(digest)`, matching the
-    ///      provider (and JustanAccount's own owner-verification convention).
-    function _passkeyProof(bytes32 digest) private pure returns (bytes memory) {
-        bytes memory authenticatorData = hex"49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d97630500000000";
-        string memory clientDataJSON = string(
-            abi.encodePacked(
-                '{"type":"webauthn.get","challenge":"',
-                Base64.encode(abi.encode(digest), true, true),
-                '","origin":"https://keys.jaw.id","crossOrigin":false}'
-            )
-        );
-        bytes32 messageHash = sha256(abi.encodePacked(authenticatorData, sha256(bytes(clientDataJSON))));
-
-        (bytes32 r, bytes32 s) = vm.signP256(PASSKEY_PK, messageHash);
-        s = bytes32(_normalizeP256S(uint256(s)));
-
-        return abi.encode(
-            WebAuthn.WebAuthnAuth({
-                authenticatorData: authenticatorData,
-                clientDataJSON: clientDataJSON,
-                typeIndex: 1,
-                challengeIndex: 23,
-                r: r,
-                s: s
-            })
-        );
-    }
-
-    /// @dev Normalizes a P-256 `s` value to low-s so the verifier's malleability check accepts it.
-    function _normalizeP256S(uint256 s) private pure returns (uint256) {
-        return s > P256_CURVE_ORDER / 2 ? P256_CURVE_ORDER - s : s;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -389,7 +353,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // A genuine assertion from the committed key, but its challenge is the digest of a different
         // ceremony — the same field-binding guarantee the EOA branch has, carried by the WebAuthn
         // challenge instead of by ecrecover.
-        bytes memory proof = _passkeyProof(provider.recoverDigest(account, subject, salt, expiry + 1));
+        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry + 1), PASSKEY_PK);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
@@ -407,7 +371,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
 
         // A genuine assertion for this ceremony, checked against a commitment holding a different key:
         // P-256 verification fails, so one guardian's passkey can never satisfy another's factor.
-        bytes memory proof = _passkeyProof(provider.recoverDigest(account, subject, salt, expiry));
+        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y + 1)), proof);
@@ -444,7 +408,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // verified straight against the committed key. The guardian's own account contract is never
         // consulted, which is what makes undeployed passkey guardians work with no ERC-6492 machinery and
         // keeps the proof free of any chain binding.
-        bytes memory proof = _passkeyProof(provider.recoverDigest(account, subject, salt, expiry));
+        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
 
         provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
     }
@@ -463,7 +427,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
 
         // Sign once, verify anywhere — the passkey half of the multichain promise.
         bytes memory commitment = encodePasskeyCommitment(bytes32(x), bytes32(y));
-        bytes memory proof = _passkeyProof(provider.recoverDigest(account, subject, salt, expiry));
+        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
 
         provider.verify(account, subject, salt, expiry, commitment, proof);
 
