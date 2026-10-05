@@ -10,7 +10,7 @@ import { JustanAccount } from "justanaccount/JustanAccount.sol";
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
 import { JustaRecoveryManager } from "../../src/JustaRecoveryManager.sol";
 import { IRecoveryManager } from "../../src/interfaces/IRecoveryManager.sol";
-import { ECDSARecoveryProvider } from "../../src/providers/ECDSARecoveryProvider.sol";
+import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
 
 /**
  * @title TestRecoveryBatchFlow
@@ -18,13 +18,14 @@ import { ECDSARecoveryProvider } from "../../src/providers/ECDSARecoveryProvider
  * @notice Integration test for the one-click instant-recovery product flow: the account composes
  * `requestRecovery` and `executeRecoveryRequest` into a single `executeBatch`. With a `delay 0` recovery the
  * queued request is executable in the same transaction, so both steps land atomically. The `requestId` is
- * deterministic, so the execute call is built ahead of the request; both manager functions are unrestricted
- * and `nonReentrant`, but the two sub-calls are sequential (not nested), so the guard composes.
+ * deterministic (`keccak256(account, subject, salt)`), so the execute call is built ahead of the request;
+ * both manager functions are unrestricted and `nonReentrant`, but the two sub-calls are sequential (not
+ * nested), so the guard composes.
  */
 contract TestRecoveryBatchFlow is Test, PrepareRecovery {
 
     JustaRecoveryManager public manager;
-    ECDSARecoveryProvider public provider;
+    SignatureRecoveryProvider public provider;
     JustanAccount public justanAccountImpl;
     EntryPoint public entryPoint;
 
@@ -33,7 +34,7 @@ contract TestRecoveryBatchFlow is Test, PrepareRecovery {
     function setUp() public {
         entryPoint = new EntryPoint();
         manager = new JustaRecoveryManager();
-        provider = new ECDSARecoveryProvider();
+        provider = new SignatureRecoveryProvider();
         justanAccountImpl = new JustanAccount(address(entryPoint), address(0));
         account = TEST_ACCOUNT_ADDRESS;
 
@@ -53,29 +54,28 @@ contract TestRecoveryBatchFlow is Test, PrepareRecovery {
         vm.assume(newOwner != address(0) && newOwner != account && newOwner != address(manager));
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
         address recoveryEoa = vm.addr(recoveryEoaPk);
-        // Committed signer must be a code-free EOA (else SignatureCheckerLib takes the ERC-1271 path).
-        vm.assume(recoveryEoa.code.length == 0);
 
         // Register an instant (delay 0) recovery.
         vm.prank(account);
         bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), 0);
 
-        // Sign a real proof over the current nonce, and precompute the deterministic request id.
+        // Sign a real proof over the ceremony (subject, salt, expiry), and precompute the deterministic id.
         bytes memory subject = encodeEoaSubject(newOwner);
-        uint256 nonce = manager.recoveryNonce(account);
-        bytes memory proof = signRecoverProof(provider, account, nonce, subject, recoveryEoaPk);
+        bytes32 salt = keccak256("salt-batch");
+        uint256 expiry = block.timestamp + 7 days;
+        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
-        bytes32 requestId = keccak256(abi.encode(account, subject, nonce));
+        bytes32 requestId = keccak256(abi.encode(account, subject, salt));
 
         // One-click recovery: queue and finalize in a single account-driven batch.
         BaseAccount.Call[] memory calls = new BaseAccount.Call[](2);
         calls[0] = BaseAccount.Call({
             target: address(manager),
             value: 0,
-            data: abi.encodeCall(manager.requestRecovery, (account, subject, approvals))
+            data: abi.encodeCall(manager.requestRecovery, (account, subject, salt, expiry, approvals))
         });
         calls[1] = BaseAccount.Call({
             target: address(manager), value: 0, data: abi.encodeCall(manager.executeRecoveryRequest, (requestId))
@@ -87,7 +87,7 @@ contract TestRecoveryBatchFlow is Test, PrepareRecovery {
         // The new owner landed in one transaction, the proof was consumed, and nothing is left pending.
         assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
         assertEq(JustanAccount(account).ownerCount(), 2);
-        assertEq(manager.recoveryNonce(account), nonce + 1);
+        assertTrue(manager.isSaltUsed(account, salt));
         assertEq(manager.recoveryRequest(requestId).account, address(0));
     }
 

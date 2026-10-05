@@ -5,50 +5,41 @@ import { EntryPoint } from "@account-abstraction/core/EntryPoint.sol";
 import { Test } from "forge-std/Test.sol";
 
 import { P256 } from "solady/utils/P256.sol";
-import { WebAuthn } from "solady/utils/WebAuthn.sol";
 
 import { JustanAccount } from "justanaccount/JustanAccount.sol";
 import { JustanAccountFactory } from "justanaccount/JustanAccountFactory.sol";
 
-import { Base64Url } from "../../lib/justanaccount/lib/FreshCryptoLib/solidity/src/utils/Base64Url.sol";
 import { ERC7739Utils } from "../../lib/justanaccount/test/utils/ERC7739Utils.sol";
 
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
 import { JustaRecoveryManager } from "../../src/JustaRecoveryManager.sol";
 import { IRecoveryManager } from "../../src/interfaces/IRecoveryManager.sol";
-import { ECDSARecoveryProvider } from "../../src/providers/ECDSARecoveryProvider.sol";
+import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
 
 /**
  * @title TestRecoveryLifecycleFlow
  *
  * @notice Integration test for the full recovery lifecycle against a real stack: a 7702-delegated
- * JustanAccount that has opted in by registering the manager as an owner, the real ECDSARecoveryProvider,
- * and a real ECDSA proof. Where the unit tests mock `verify` and the account and only assert the
+ * JustanAccount that has opted in by registering the manager as an owner, the real SignatureRecoveryProvider,
+ * and real guardian proofs. Where the unit tests mock `verify` and the account and only assert the
  * `addOwner*` selector was called, these prove the new owner is genuinely registered on the account after
- * `addRecovery -> requestRecovery -> warp -> executeRecoveryRequest`.
+ * `addRecovery -> requestRecovery -> warp -> executeRecoveryRequest`. It also pins the provider's deliberate
+ * strictness: a smart-account guardian enrolled by its address can never approve a recovery, even with a
+ * signature its own ERC-1271 `isValidSignature` accepts.
  */
 contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
 
     JustaRecoveryManager public manager;
-    ECDSARecoveryProvider public provider;
+    SignatureRecoveryProvider public provider;
     JustanAccount public justanAccountImpl;
     JustanAccountFactory public factory;
     JustanAccount public guardian;
     EntryPoint public entryPoint;
 
-    /// @dev The guardian's passkey private key
-    uint256 public constant GUARDIAN_PASSKEY_PK = 0x03d99692017473e2d631945a812607b23269d85721e0f370b8d3e7d29a874fd2;
-
-    /// @dev A fresh factory nonce for the counterfactual (undeployed) guardian in the ERC-6492 test.
-    uint256 internal constant GUARDIAN_CF_NONCE = 1;
-
-    /// @dev The ERC-6492 magic suffix that marks a wrapped (predeploy) signature.
-    bytes32 internal constant ERC6492_MAGIC = 0x6492649264926492649264926492649264926492649264926492649264926492;
-
     function setUp() public {
         entryPoint = new EntryPoint();
         manager = new JustaRecoveryManager();
-        provider = new ECDSARecoveryProvider();
+        provider = new SignatureRecoveryProvider();
         justanAccountImpl = new JustanAccount(address(entryPoint), address(0));
 
         vm.deal(TEST_ACCOUNT_ADDRESS, 10 ether);
@@ -64,7 +55,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         vm.etch(P256.VERIFIER, P256_VERIFIER_BYTECODE);
         vm.etch(P256.RIP_PRECOMPILE, P256_VERIFIER_BYTECODE);
 
-        (uint256 x, uint256 y) = vm.publicKeyP256(GUARDIAN_PASSKEY_PK);
+        (uint256 x, uint256 y) = vm.publicKeyP256(PASSKEY_PK);
         factory = new JustanAccountFactory(address(entryPoint));
         bytes[] memory guardianOwners = new bytes[](1);
         guardianOwners[0] = abi.encode(bytes32(x), bytes32(y));
@@ -96,33 +87,34 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         vm.assume(uint160(recipient) > 0xff);
         vm.assume(recipient.code.length == 0);
 
-        // Fuzz the committed recovery EOA via its signing key (vm.addr/vm.sign need a key in [1, n-1]).
+        // Fuzz the committed recovery EOA via its signing key (vm.addr/vm.sign need a key in [1, n-1]). Under
+        // the new provider's strict ecrecover the guardian's code length is irrelevant (its account contract
+        // is never consulted), so the old `recoveryEoa.code.length == 0` ERC-1271-path guard is gone.
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
         address recoveryEoa = vm.addr(recoveryEoaPk);
-        // Committed signer must be a code-free EOA (else SignatureCheckerLib takes the ERC-1271 path).
-        vm.assume(recoveryEoa.code.length == 0);
 
         // Register a single ECDSA recovery committing to `recoveryEoa`.
         vm.prank(account);
         bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), delay);
 
-        // The committed EOA signs a real proof over the account's current nonce and the new owner.
+        // The committed EOA signs a real proof over the ceremony's (subject, salt, expiry).
         bytes memory subject = encodeEoaSubject(newOwner);
-        uint256 nonce = manager.recoveryNonce(account);
-        bytes memory proof = signRecoverProof(provider, account, nonce, subject, recoveryEoaPk);
+        bytes32 salt = keccak256("salt-eoa-owner");
+        uint256 expiry = block.timestamp + 7 days;
+        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
         // Queue the request, then fast-forward to its execution time and finalize.
-        bytes32 requestId = manager.requestRecovery(account, subject, approvals);
+        bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
         vm.warp(manager.recoveryRequest(requestId).executeAt);
         manager.executeRecoveryRequest(requestId);
 
-        // The new EOA is now a real owner (manager + newOwner = 2) and the proof has been consumed.
+        // The new EOA is now a real owner (manager + newOwner = 2) and the ceremony salt has been consumed.
         assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
         assertEq(JustanAccount(account).ownerCount(), 2);
-        assertEq(manager.recoveryNonce(account), nonce + 1);
+        assertTrue(manager.isSaltUsed(account, salt));
 
         // Confirm recovered owner can control the account with an ETH transfer.
         uint256 recipientBefore = recipient.balance;
@@ -149,41 +141,52 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
 
         // The recovered passkey must not already be on the account.
         vm.assume(!JustanAccount(account).isOwnerPublicKey(x, y));
+        // The all-zero public key is a dead owner (P256 rejects it), so `_validateSubject` reverts
+        // `InvalidSubject` on it — exclude the draw rather than let it flake this happy-path fuzz run.
+        vm.assume(!(x == 0 && y == 0));
 
-        // Fuzz the committed recovery EOA via its signing key (vm.addr/vm.sign need a key in [1, n-1]).
+        // Fuzz the committed recovery EOA via its signing key (vm.addr/vm.sign need a key in [1, n-1]). Code
+        // length is irrelevant under strict ecrecover, so no guard on `recoveryEoa` (see the EOA-owner test).
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
         address recoveryEoa = vm.addr(recoveryEoaPk);
-        // Committed signer must be a code-free EOA (else SignatureCheckerLib takes the ERC-1271 path).
-        vm.assume(recoveryEoa.code.length == 0);
 
         vm.prank(account);
         bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), delay);
 
         bytes memory subject = encodePasskeySubject(x, y);
-        uint256 nonce = manager.recoveryNonce(account);
-        bytes memory proof = signRecoverProof(provider, account, nonce, subject, recoveryEoaPk);
+        bytes32 salt = keccak256("salt-passkey-owner");
+        uint256 expiry = block.timestamp + 7 days;
+        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
-        bytes32 requestId = manager.requestRecovery(account, subject, approvals);
+        bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
         vm.warp(manager.recoveryRequest(requestId).executeAt);
         manager.executeRecoveryRequest(requestId);
 
-        // The new passkey is now a real owner (manager + passkey = 2) and the proof has been consumed.
+        // The new passkey is now a real owner (manager + passkey = 2) and the ceremony salt has been consumed.
         assertTrue(JustanAccount(account).isOwnerPublicKey(x, y));
         assertEq(JustanAccount(account).ownerCount(), 2);
-        assertEq(manager.recoveryNonce(account), nonce + 1);
+        assertTrue(manager.isSaltUsed(account, salt));
     }
 
     /**
-     * @notice Recovers an account end to end where the recovery factor is a passkey-backed smart-account
-     *         guardian, proving the new owner is genuinely registered.
-     * @dev Distinct from recovering *to* a passkey above: here the passkey is the guardian (the recovery
-     *      `commitment`), so the proof is a WebAuthn signature the guardian validates via ERC-1271 — the
-     *      `SignatureCheckerLib` contract-signer path in the provider.
+     * @notice A smart-account guardian enrolled by its ADDRESS (32-byte commitment) can NEVER approve a
+     *         recovery, even with a signature its own ERC-1271 `isValidSignature` accepts.
+     * @dev This test pins the deliberate strictness of the new provider, and is valuable precisely because
+     *      the inner signature is REAL: a WebAuthn assertion from the guardian's passkey, wrapped in ERC-7739
+     *      PersonalSign over the provider digest — exactly the envelope the guardian re-derives and accepts in
+     *      `isValidSignature` (asserted below). Yet a 32-byte commitment is verified with STRICT ecrecover
+     *      only, with no ERC-1271/6492 fallback. WHY this is the desired behavior: a 1271 door would let a
+     *      smart-account signer re-bind `block.chainid` inside its own verification, silently producing
+     *      per-chain proofs and breaking the sign-once multichain promise. Smart-account guardians are
+     *      therefore excluded by design; the supported multichain factor is the raw P-256 passkey public key
+     *      (a 64-byte commitment), verified directly in the provider with no account contract in the loop.
+     *      Because the proof genuinely passes the guardian's 1271 check, a green revert here proves no 1271
+     *      door exists.
      */
-    function test_ShouldRecoverWithPasskeyGuardianEndToEnd(address newOwner, uint32 delay) public {
+    function test_RequestRecovery_RevertWhenGuardianIsSmartAccount(address newOwner, uint32 delay) public {
         address payable account = TEST_ACCOUNT_ADDRESS;
 
         // The recovered owner must not already be on the account.
@@ -191,81 +194,35 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         vm.assume(newOwner != account);
         vm.assume(newOwner != address(manager));
 
-        // Register the passkey-backed guardian as the recovery (commitment = the guardian contract address).
+        // Enroll the passkey-backed guardian by its contract ADDRESS as a 32-byte (EOA-shaped) commitment.
         vm.prank(account);
         bytes32 recoveryId =
             manager.addRecovery(account, address(provider), encodeEoaCommitment(address(guardian)), delay);
 
         bytes memory subject = encodeEoaSubject(newOwner);
-        uint256 nonce = manager.recoveryNonce(account);
+        bytes32 salt = keccak256("salt-smart-account-guardian");
+        uint256 expiry = block.timestamp + 7 days;
 
-        // The guardian's passkey signs a real WebAuthn proof over the provider's digest.
-        bytes memory proof = _signPasskeyGuardianProof(account, nonce, subject);
+        // A proof the guardian would accept via ERC-1271: its passkey's WebAuthn assertion, ERC-7739-wrapped
+        // over the provider's canonical digest using the guardian's own EIP-712 domain.
+        bytes memory proof = _signPasskeyGuardianProof(account, subject, salt, expiry);
 
-        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
-        approvals[0] = createApproval(recoveryId, proof);
-
-        bytes32 requestId = manager.requestRecovery(account, subject, approvals);
-        vm.warp(manager.recoveryRequest(requestId).executeAt);
-        manager.executeRecoveryRequest(requestId);
-
-        // The new EOA is a real owner (manager + newOwner = 2) and the proof has been consumed.
-        assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
-        assertEq(JustanAccount(account).ownerCount(), 2);
-        assertEq(manager.recoveryNonce(account), nonce + 1);
-    }
-
-    /**
-     * @notice Recovers an account using a COUNTERFACTUAL (not-yet-deployed) passkey-backed smart-account
-     *         guardian, exercising the provider's ERC-6492 path.
-     * @dev The guardian address is predicted but never deployed. The proof is an ERC-6492 wrapper
-     *      (create2 factory + `createAccount` calldata + inner WebAuthn signature). Solady's reverting
-     *      verifier deploys the guardian in a reverted context to run its ERC-1271 check, so the guardian
-     *      is validated without ending up persistently deployed.
-     */
-    function test_ShouldRecoverWithUndeployedPasskeyGuardianEndToEnd(address newOwner, uint32 delay) public {
-        address payable account = TEST_ACCOUNT_ADDRESS;
-
-        vm.assume(newOwner != address(0));
-        vm.assume(newOwner != account);
-        vm.assume(newOwner != address(manager));
-
-        // Etch Solady's canonical ERC-6492 reverting verifier so the undeployed-signer path resolves.
-        _etchErc6492RevertingVerifier();
-
-        // A counterfactual passkey guardian: address predicted from a fresh nonce, deliberately NOT deployed.
-        (uint256 gx, uint256 gy) = vm.publicKeyP256(GUARDIAN_PASSKEY_PK);
-        bytes[] memory guardianOwners = new bytes[](1);
-        guardianOwners[0] = abi.encode(bytes32(gx), bytes32(gy));
-        address undeployedGuardian = factory.getAddress(guardianOwners, GUARDIAN_CF_NONCE);
-        assertEq(undeployedGuardian.code.length, 0);
-
-        vm.prank(account);
-        bytes32 recoveryId =
-            manager.addRecovery(account, address(provider), encodeEoaCommitment(undeployedGuardian), delay);
-
-        bytes memory subject = encodeEoaSubject(newOwner);
-        uint256 nonce = manager.recoveryNonce(account);
-
-        // ERC-6492 wrapper: abi.encode(create2Factory, factoryCalldata, innerSig) ++ magic. The inner proof is
-        // a WebAuthn signature over the guardian's *predicted* EIP-712 domain (it isn't deployed to query).
-        bytes memory innerProof = _webAuthnProof(_guardian7739Hash(undeployedGuardian, account, nonce, subject));
-        bytes memory factoryCalldata =
-            abi.encodeCall(JustanAccountFactory.createAccount, (guardianOwners, GUARDIAN_CF_NONCE));
-        bytes memory proof = abi.encodePacked(abi.encode(address(factory), factoryCalldata, innerProof), ERC6492_MAGIC);
+        // Sanity: the very same proof genuinely verifies through the guardian's own ERC-1271 door...
+        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        assertTrue(guardian.isValidSignature(digest, proof) == ERC1271_MAGIC);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
-        bytes32 requestId = manager.requestRecovery(account, subject, approvals);
-        vm.warp(manager.recoveryRequest(requestId).executeAt);
-        manager.executeRecoveryRequest(requestId);
+        // ...yet the provider rejects it: a 32-byte commitment is strict-ecrecover only, so a WebAuthn/1271
+        // envelope can never satisfy it.
+        vm.expectRevert(
+            abi.encodeWithSelector(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector)
+        );
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
 
-        // The new EOA is a real owner, and the guardian was validated WITHOUT being persistently deployed.
-        assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
-        assertEq(JustanAccount(account).ownerCount(), 2);
-        assertEq(manager.recoveryNonce(account), nonce + 1);
-        assertEq(undeployedGuardian.code.length, 0);
+        // The rejected request consumed nothing: the ceremony salt stays fully replayable.
+        assertFalse(manager.isSaltUsed(account, salt));
     }
 
     /**
@@ -277,6 +234,9 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
      */
     function test_AddRecovery_RevertIfManagerNotAccountOwner(address freshOwner) public {
         vm.assume(freshOwner != address(0));
+        // `address(manager)` is in the fuzzer's address dictionary: drawing it would make the fresh account
+        // born with the manager already an owner, so the expected revert would never fire.
+        vm.assume(freshOwner != address(manager));
 
         bytes[] memory freshOwners = new bytes[](1);
         freshOwners[0] = abi.encode(freshOwner);
@@ -302,38 +262,110 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
     }
 
     /**
+     * @notice If the 7702 delegation is revoked mid-timelock, execution reverts loudly and the queued request
+     *         survives, so recovery resumes the moment the delegation returns.
+     * @dev The story SPEC-MULTICHAIN-ADMIN §9a flags: `addOwnerAddress`/`addOwnerPublicKey` return nothing, so
+     *      Solidity emits no code-existence check and a call to a re-codeless address would SUCCEED vacuously
+     *      — request deleted, event emitted, no owner added. The manager's `account.code.length` guard turns
+     *      that silent false success into `JustaRecoveryManager_AccountHasNoCode`, and because the guard fires
+     *      before the CEI delete the pending request is never burned.
+     * @dev Where the unit coverage pins this against a mocked address, this proves it on the real delegated
+     *      account: the delegation designator is saved, wiped with `vm.etch(account, "")` (the key holder
+     *      un-delegating), then etched back verbatim. Re-etching the saved code is the honest equivalent of a
+     *      fresh authorization tuple — `vm.signAndAttachDelegation` cannot be re-run cleanly mid-test — and it
+     *      restores the exact `0xef0100 || implementation` designator the account had.
+     */
+    function test_ShouldPreserveRequestWhenDelegationRevokedMidTimelock(
+        address newOwner,
+        uint256 recoveryEoaPk,
+        uint32 delay
+    )
+        public
+    {
+        address payable account = TEST_ACCOUNT_ADDRESS;
+
+        vm.assume(newOwner != address(0));
+        vm.assume(newOwner != account);
+        vm.assume(newOwner != address(manager));
+        // A nonzero delay is what makes "mid-timelock" a real window.
+        vm.assume(delay > 0);
+
+        recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
+        address recoveryEoa = vm.addr(recoveryEoaPk);
+
+        vm.prank(account);
+        bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), delay);
+
+        bytes memory subject = encodeEoaSubject(newOwner);
+        bytes32 salt = keccak256("salt-delegation-revoked");
+        uint256 expiry = block.timestamp + 7 days;
+
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] =
+            createApproval(recoveryId, signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk));
+
+        bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
+        uint64 executeAt = manager.recoveryRequest(requestId).executeAt;
+
+        // Save the live delegation designator, then un-delegate: the address is a bare EOA again.
+        bytes memory delegatedCode = account.code;
+        assertGt(delegatedCode.length, 0);
+        vm.etch(account, "");
+        assertEq(account.code.length, 0);
+
+        // At `executeAt` the guard fires instead of a vacuous success.
+        vm.warp(executeAt);
+        vm.expectRevert(
+            abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_AccountHasNoCode.selector, account)
+        );
+        manager.executeRecoveryRequest(requestId);
+
+        // The request was NOT burned by the failed attempt (the guard precedes the CEI delete).
+        assertEq(manager.recoveryRequest(requestId).account, account);
+
+        // Re-delegating restores the account, and the surviving request finalizes with no re-signing.
+        vm.etch(account, delegatedCode);
+        manager.executeRecoveryRequest(requestId);
+
+        assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
+        assertEq(JustanAccount(account).ownerCount(), 2);
+    }
+
+    /**
      * @dev Builds the guardian's ERC-1271 proof: a WebAuthn signature from the guardian's passkey over the
-     *      provider's `(account, nonce, subject)` digest, wrapped in ERC-7739 (PersonalSign) using the
+     *      provider's `(account, subject, salt, expiry)` digest, wrapped in ERC-7739 (PersonalSign) using the
      *      guardian account's own EIP-712 domain — the form the guardian re-derives in `isValidSignature`.
      */
     function _signPasskeyGuardianProof(
         address account,
-        uint256 nonce,
-        bytes memory subject
+        bytes memory subject,
+        bytes32 salt,
+        uint256 expiry
     )
         internal
         view
         returns (bytes memory)
     {
-        return _webAuthnProof(_guardian7739Hash(address(guardian), account, nonce, subject));
+        return _webAuthnProof(_guardian7739Hash(address(guardian), account, subject, salt, expiry));
     }
 
     /**
      * @dev The ERC-7739 (PersonalSign) hash a JustanAccount `signer` validates in `isValidSignature`, built
-     *      from the signer's *predicted* EIP-712 domain (name/version/chainId/address). Computing the domain
-     *      from the address rather than querying `eip712Domain()` lets it work for a not-yet-deployed guardian.
+     *      from the signer's EIP-712 domain (name/version/chainId/address) and the provider's canonical
+     *      recovery digest.
      */
     function _guardian7739Hash(
         address signer,
         address account,
-        uint256 nonce,
-        bytes memory subject
+        bytes memory subject,
+        bytes32 salt,
+        uint256 expiry
     )
         internal
         view
         returns (bytes32)
     {
-        bytes32 digest = provider.recoverDigest(account, nonce, subject);
+        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
 
         ERC7739Utils.DomainData memory domainData;
         domainData.name = "JustanAccount";
@@ -348,53 +380,9 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
     /// @dev Wraps `erc7739Hash` in a WebAuthn assertion signed by the guardian's passkey, ABI-encoded as a
     ///      JustanAccount `SignatureWrapper` at owner index 0.
     function _webAuthnProof(bytes32 erc7739Hash) internal pure returns (bytes memory) {
-        bytes memory authenticatorData = hex"49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d97630500000000";
-        string memory clientDataJSON = string(
-            abi.encodePacked(
-                '{"type":"webauthn.get","challenge":"',
-                Base64Url.encode(abi.encode(erc7739Hash)),
-                '","origin":"https://keys.jaw.id","crossOrigin":false}'
-            )
-        );
-        bytes32 messageHash = sha256(abi.encodePacked(authenticatorData, sha256(bytes(clientDataJSON))));
-
-        (bytes32 r, bytes32 s) = vm.signP256(GUARDIAN_PASSKEY_PK, messageHash);
-        s = bytes32(_normalizeP256S(uint256(s)));
-
         return abi.encode(
-            JustanAccount.SignatureWrapper({
-                ownerIndex: 0,
-                signatureData: abi.encode(
-                    WebAuthn.WebAuthnAuth({
-                        authenticatorData: authenticatorData,
-                        clientDataJSON: clientDataJSON,
-                        typeIndex: 1,
-                        challengeIndex: 23,
-                        r: r,
-                        s: s
-                    })
-                )
-            })
+            JustanAccount.SignatureWrapper({ ownerIndex: 0, signatureData: signWebAuthnProof(erc7739Hash, PASSKEY_PK) })
         );
-    }
-
-    /// @dev Normalizes a P-256 `s` value to low-s so the verifier accepts it.
-    function _normalizeP256S(uint256 s) private pure returns (uint256) {
-        uint256 n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;
-        return s > n / 2 ? n - s : s;
-    }
-
-    /// @dev Deploys Solady's canonical reverting ERC-6492 verifier (initcode taken from Solady's own tests)
-    ///      at the hardcoded address `SignatureCheckerLib` calls, so the undeployed-signer path resolves.
-    function _etchErc6492RevertingVerifier() internal {
-        bytes memory initcode =
-            hex"6040600b3d3960403df3fe36383d373d3d6020515160208051013d3d515af160203851516084018038385101606037303452813582523838523490601c34355afa34513060e01b141634fd";
-        address deployed;
-        assembly {
-            deployed := create(0, add(initcode, 0x20), mload(initcode))
-        }
-        require(deployed != address(0), "verifier deploy failed");
-        vm.etch(0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e, deployed.code);
     }
 
 }

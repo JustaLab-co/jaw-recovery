@@ -67,9 +67,28 @@ abstract contract CodeConstants {
     uint256 public constant TEST_ACCOUNT_PRIVATE_KEY =
         0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d;
 
+    /// @notice A fixed P-256 passkey private key for WebAuthn tests (P-256 keys are not fuzzable like
+    ///         secp256k1 ones; passkey-branch logic is key-independent).
+    uint256 public constant PASSKEY_PK = 0x03d99692017473e2d631945a812607b23269d85721e0f370b8d3e7d29a874fd2;
+
     // Secp256k1 curve order for signature validation
     uint256 public constant SECP256K1_CURVE_ORDER =
         115_792_089_237_316_195_423_570_985_008_687_907_852_837_564_279_074_904_382_605_163_141_518_161_494_337;
+
+    /// @notice secp256r1 (P-256) curve order, for low-s normalization of `vm.signP256` outputs.
+    uint256 public constant P256_CURVE_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;
+
+    ////////////////////////////////////////////////////////////////////////
+    // SIGNATURE TEST CONSTANTS
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice `keccak256("EIP712Domain(string name,string version,address verifyingContract)")` — the
+    ///         sans-chainId domain typehash Solady uses in `_hashTypedDataSansChainId`.
+    bytes32 public constant DOMAIN_TYPEHASH_SANS_CHAIN_ID =
+        keccak256("EIP712Domain(string name,string version,address verifyingContract)");
+
+    /// @notice The ERC-1271 magic value / selector (`isValidSignature(bytes32,bytes)`).
+    bytes4 public constant ERC1271_MAGIC = 0x1626ba7e;
 
     ////////////////////////////////////////////////////////////////////////
     // P256 VERIFIER (WebAuthn test infra)

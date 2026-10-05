@@ -10,19 +10,20 @@ import { MultiOwnable } from "justanaccount/MultiOwnable.sol";
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
 import { JustaRecoveryManager } from "../../src/JustaRecoveryManager.sol";
 import { IRecoveryManager } from "../../src/interfaces/IRecoveryManager.sol";
-import { ECDSARecoveryProvider } from "../../src/providers/ECDSARecoveryProvider.sol";
+import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
 
 /**
  * @title TestRecoveryTimelockFlow
  *
  * @notice Integration test for the recovery time-lock against a real stack: a queued request is not
- * executable before its delay elapses, and the account can abort a pending request so it never executes.
- * Both prove the real end-to-end consequence — whether the new owner actually lands on the account.
+ * executable before its delay elapses, the account can abort a pending request so it never executes, and a
+ * request stays executable even after its ceremony `expiry` passes (expiry gates request time only). All
+ * prove the real end-to-end consequence — whether the new owner actually lands on the account.
  */
 contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
 
     JustaRecoveryManager public manager;
-    ECDSARecoveryProvider public provider;
+    SignatureRecoveryProvider public provider;
     JustanAccount public justanAccountImpl;
     EntryPoint public entryPoint;
 
@@ -31,7 +32,7 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
     function setUp() public {
         entryPoint = new EntryPoint();
         manager = new JustaRecoveryManager();
-        provider = new ECDSARecoveryProvider();
+        provider = new SignatureRecoveryProvider();
         justanAccountImpl = new JustanAccount(address(entryPoint), address(0));
         account = TEST_ACCOUNT_ADDRESS;
 
@@ -43,31 +44,35 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         JustanAccount(account).addOwnerAddress(address(manager));
     }
 
-    /// @dev Registers a single ECDSA recovery committing to `vm.addr(recoveryEoaPk)` and queues a request
-    ///      for `newOwner`, returning the request id.
+    /// @dev Registers a single EOA-guardian recovery committing to `vm.addr(recoveryEoaPk)` and queues a
+    ///      request for `newOwner` over the given ceremony `(salt, expiry)`, returning the request id.
+    /// @dev Pins `executeAt == requestedAt + delay` here rather than in each test: every test below warps to
+    ///      the `executeAt` it reads back from the contract, so a wrong formula (the delay ignored, say)
+    ///      would be invisible everywhere. One assert in the shared helper pins them all.
     function _queueEoaRequest(
         address newOwner,
         uint256 recoveryEoaPk,
-        uint32 delay
+        uint32 delay,
+        bytes32 salt,
+        uint256 expiry
     )
         private
         returns (bytes32 requestId, bytes memory subject)
     {
         address recoveryEoa = vm.addr(recoveryEoaPk);
-        // Committed signer must be a code-free EOA (else SignatureCheckerLib takes the ERC-1271 path).
-        vm.assume(recoveryEoa.code.length == 0);
 
         vm.prank(account);
         bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), delay);
 
         subject = encodeEoaSubject(newOwner);
-        uint256 nonce = manager.recoveryNonce(account);
-        bytes memory proof = signRecoverProof(provider, account, nonce, subject, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
-        requestId = manager.requestRecovery(account, subject, approvals);
+        uint256 requestedAt = block.timestamp;
+        requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
+        assertEq(manager.recoveryRequest(requestId).executeAt, uint64(requestedAt + delay));
     }
 
     /**
@@ -84,7 +89,8 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         vm.assume(delay > 0);
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
 
-        (bytes32 requestId,) = _queueEoaRequest(newOwner, recoveryEoaPk, delay);
+        (bytes32 requestId,) =
+            _queueEoaRequest(newOwner, recoveryEoaPk, delay, keccak256("salt-timelock-delay"), block.timestamp + 7 days);
         uint64 executeAt = manager.recoveryRequest(requestId).executeAt;
 
         // Before the delay elapses, execution is rejected and no owner is added.
@@ -96,6 +102,38 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
 
         // At `executeAt` the request finalizes and the owner lands.
         vm.warp(executeAt);
+        manager.executeRecoveryRequest(requestId);
+        assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
+        assertEq(JustanAccount(account).ownerCount(), 2);
+    }
+
+    /**
+     * @notice A queued request stays executable after its ceremony `expiry` passes.
+     * @dev Expiry bounds only how long unused proofs may be submitted at request time; it is never re-checked
+     *      once a request is queued. Warping past both the delay and the (short) expiry still finalizes.
+     */
+    function test_ShouldRemainExecutableAfterExpiryPasses(
+        address newOwner,
+        uint256 recoveryEoaPk,
+        uint32 delay
+    )
+        public
+    {
+        vm.assume(newOwner != address(0) && newOwner != address(manager));
+        recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
+
+        // A short ceremony expiry; the request is queued while it is still valid.
+        uint256 shortExpiry = block.timestamp + 1 days;
+        (bytes32 requestId,) =
+            _queueEoaRequest(newOwner, recoveryEoaPk, delay, keccak256("salt-timelock-expiry"), shortExpiry);
+
+        uint256 executeAt = manager.recoveryRequest(requestId).executeAt;
+
+        // Warp past BOTH the delay and the ceremony expiry: a queued request is unaffected by expiry passing.
+        uint256 warpTo = executeAt > shortExpiry ? executeAt + 1 : shortExpiry + 1;
+        vm.warp(warpTo);
+        assertGt(block.timestamp, shortExpiry);
+
         manager.executeRecoveryRequest(requestId);
         assertTrue(JustanAccount(account).isOwnerAddress(newOwner));
         assertEq(JustanAccount(account).ownerCount(), 2);
@@ -116,7 +154,9 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         vm.assume(newOwner != address(0) && newOwner != address(manager));
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
 
-        (bytes32 requestId,) = _queueEoaRequest(newOwner, recoveryEoaPk, delay);
+        (bytes32 requestId,) = _queueEoaRequest(
+            newOwner, recoveryEoaPk, delay, keccak256("salt-timelock-cancel"), block.timestamp + 7 days
+        );
 
         // The account aborts the pending request.
         vm.prank(account);
@@ -150,7 +190,9 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         vm.assume(newOwner != address(0) && newOwner != address(manager));
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
 
-        (bytes32 requestId,) = _queueEoaRequest(newOwner, recoveryEoaPk, delay);
+        (bytes32 requestId,) = _queueEoaRequest(
+            newOwner, recoveryEoaPk, delay, keccak256("salt-timelock-cancel-late"), block.timestamp + 7 days
+        );
 
         // Warp past executeAt: the request is now executable by anyone.
         vm.warp(uint256(manager.recoveryRequest(requestId).executeAt) + 1);
@@ -187,7 +229,9 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         vm.assume(newOwner != address(0) && newOwner != address(manager));
         recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
 
-        (bytes32 requestId, bytes memory subject) = _queueEoaRequest(newOwner, recoveryEoaPk, delay);
+        (bytes32 requestId, bytes memory subject) = _queueEoaRequest(
+            newOwner, recoveryEoaPk, delay, keccak256("salt-timelock-preserve"), block.timestamp + 7 days
+        );
 
         // During the delay window the subject becomes an owner by another path, so execution will hit
         // MultiOwnable's already-owner guard.
