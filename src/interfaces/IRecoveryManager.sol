@@ -9,7 +9,7 @@ pragma solidity 0.8.30;
  *
  * @dev The unit of recovery is a "recovery": a `(provider, commitment)` pair plus a per-recovery
  *      time-lock `delay`. The same provider may back several recoveries for one account, each with its
- *      own delay. The manager owns the recoveries, the per-account used-salt registry, and the approval
+ *      own delay. The manager owns the recoveries, the per-account used-salt registries, and the approval
  *      threshold; providers are stateless verifiers (see {IRecoveryProvider}).
  * @dev Recovery is a two-step time-locked flow: `requestRecovery` verifies one proof per recovery for the
  *      account's threshold of distinct recoveries and queues a request at `block.timestamp + maxDelay`
@@ -122,9 +122,11 @@ interface IRecoveryManager {
     error JustaRecoveryManager_InvalidSubject(bytes subject);
 
     /**
-     * @notice Thrown when the ceremony's `salt` was already consumed for `account` on this chain.
-     * @dev Consumption makes a ceremony's proofs single-use per chain; other chains consume the same salt
-     *      independently.
+     * @notice Thrown when a ceremony's or an admin batch's `salt` was already consumed for `account` on
+     *         this chain by an authorization of the same kind.
+     * @dev Consumption makes a ceremony's proofs (or an admin batch's signature) single-use per chain;
+     *      other chains consume the same salt independently. Ceremony salts and admin-batch salts are
+     *      tracked separately, so one kind can never consume the other's.
      * @param account The smart account.
      * @param salt The already-consumed salt.
      */
@@ -333,7 +335,8 @@ interface IRecoveryManager {
      *      apply the identical internal logic.
      * @dev The signed digest omits `chainId` (the manager deploys at the same deterministic address on
      *      every chain) and binds `(account, ops, salt, expiry)`; see `recoveryAdminDigest`.
-     * @dev `salt` shares the ceremony registry: single-use per chain, reusable across chains until `expiry`.
+     * @dev `salt` is single-use per chain and reusable across chains until `expiry`. Admin-batch salts are
+     *      tracked separately from ceremony salts, so a ceremony can never consume a batch's salt.
      * @dev The signer must be a CURRENT owner of `account` in canonical owner-bytes form — 32-byte
      *      `abi.encode(address)` (EOA, strict ecrecover) or 64-byte `abi.encode(x, y)` (raw passkey,
      *      direct WebAuthn). A smart-account owner cannot sign chain-agnostically (its ERC-1271 door binds
@@ -453,11 +456,19 @@ interface IRecoveryManager {
     function recoveryThreshold(address account) external view returns (uint256);
 
     /**
-     * @notice Whether `salt` has been consumed for `account` on this chain.
+     * @notice Whether `salt` has been consumed by a recovery ceremony for `account` on this chain.
      * @dev A salt is consumed by a successful `requestRecovery` and can never queue again here; the same
      *      ceremony stays submittable on chains that have not consumed it.
+     * @dev Does not report admin-batch salts; see `isAdminSaltUsed`.
      */
     function isSaltUsed(address account, bytes32 salt) external view returns (bool);
+
+    /**
+     * @notice Whether `salt` has been consumed by a signed admin batch for `account` on this chain.
+     * @dev A salt is consumed by a successful `executeRecoveryAdmin`; the same signed batch stays
+     *      submittable on chains that have not consumed it.
+     */
+    function isAdminSaltUsed(address account, bytes32 salt) external view returns (bool);
 
     /**
      * @notice Compute the chain-agnostic EIP-712 digest an owner must sign to authorize an admin batch.

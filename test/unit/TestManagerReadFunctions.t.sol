@@ -290,6 +290,14 @@ contract TestManagerReadFunctions is Test, PrepareRecovery {
     }
 
     /*//////////////////////////////////////////////////////////////
+                          isAdminSaltUsed() TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_IsAdminSaltUsed_ShouldBeFalseInitially(address account, bytes32 salt) public view {
+        assertFalse(manager.isAdminSaltUsed(account, salt));
+    }
+
+    /*//////////////////////////////////////////////////////////////
                       recoveryAdminDigest() TESTS
     //////////////////////////////////////////////////////////////*/
 

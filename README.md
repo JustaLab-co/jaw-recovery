@@ -30,7 +30,7 @@ The system consists of a coordinator, a provider interface, and one concrete pro
 
 ### JustaRecoveryManager (Main Contract)
 
-The singleton coordinator that owns all per-account state (registered recoveries, approval threshold, used-salt registry) and queued recovery requests. It inherits from:
+The singleton coordinator that owns all per-account state (registered recoveries, approval threshold, used-salt registries) and queued recovery requests. It inherits from:
 
 - `IRecoveryManager` (the manager's interface — errors, events, types, and function signatures)
 - `ReentrancyGuard` (Solady's reentrancy protection)
@@ -144,6 +144,7 @@ Callable only by the account (`msg.sender == account`):
 - `recoveryCount(address account)`: Number of registered recoveries.
 - `recoveryThreshold(address account)`: The effective approval threshold (1 if never set).
 - `isSaltUsed(address account, bytes32 salt)`: Whether a ceremony's salt has been consumed on this chain.
+- `isAdminSaltUsed(address account, bytes32 salt)`: Whether a signed admin batch's salt has been consumed on this chain.
 - `recoveryRequest(bytes32 requestId)`: The pending request (zeroed if not pending).
 
 ## Security Model
@@ -193,6 +194,9 @@ mapping(address account => uint256 threshold) internal _recoveryThreshold;
 
 // Per-account registry of consumed ceremony salts
 mapping(address account => mapping(bytes32 salt => bool used)) internal _usedSalts;
+
+// Per-account registry of consumed admin-batch salts (separate, so a ceremony cannot burn a batch's salt)
+mapping(address account => mapping(bytes32 salt => bool used)) internal _usedAdminSalts;
 
 // Pending recovery requests, keyed by request id
 mapping(bytes32 requestId => RecoveryRequest request) internal _recoveryRequests;

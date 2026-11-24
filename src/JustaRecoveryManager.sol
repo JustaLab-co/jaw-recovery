@@ -23,7 +23,7 @@ import { SignatureProofLib } from "./libraries/SignatureProofLib.sol";
  *      keyed by `recoveryId = keccak256(abi.encode(account, provider, commitment))`. The same provider may
  *      back several recoveries for one account.
  * @dev The manager owns all state — recoveries & commitments, the approval threshold, the per-recovery
- *      delays, and the per-account used-salt registry — and treats providers as stateless verifiers: on
+ *      delays, and the per-account used-salt registries — and treats providers as stateless verifiers: on
  *      each approval it calls `provider.verify(account, subject, salt, expiry, commitment, proof)`, which
  *      reverts on an invalid proof and returns a magic value on a valid one. Provider trust is therefore
  *      equivalent to provider correctness.
@@ -81,13 +81,21 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     mapping(address account => uint256 threshold) internal _recoveryThreshold;
 
     /**
-     * @notice Per-account registry of consumed salts — one namespace shared by recovery ceremonies and
-     *         signed admin batches.
-     * @dev A salt is bound into every proof of its ceremony or admin batch and consumed on success, which
-     *      makes the authorization single-use on this chain while the same bytes stay submittable on chains
-     *      that have not consumed the salt. A ceremony's salt also seeds its deterministic `requestId`.
+     * @notice Per-account registry of salts consumed by recovery ceremonies.
+     * @dev A salt is bound into every proof of its ceremony and consumed on success, which makes the
+     *      proofs single-use on this chain while the same bytes stay submittable on chains that have not
+     *      consumed the salt. The salt also seeds the ceremony's deterministic `requestId`.
      */
     mapping(address account => mapping(bytes32 salt => bool used)) internal _usedSalts;
+
+    /**
+     * @notice Per-account registry of salts consumed by signed admin batches.
+     * @dev Deliberately separate from the ceremony registry. Salts are public once a signature is
+     *      broadcast, so with one shared registry a threshold of guardians could burn the salt of an
+     *      owner's pending admin batch (e.g. a cancel) by submitting a ceremony that reuses it. Each kind of
+     *      authorization can only consume salts of its own kind.
+     */
+    mapping(address account => mapping(bytes32 salt => bool used)) internal _usedAdminSalts;
 
     /**
      * @notice Pending recovery requests keyed by `requestId`.
@@ -169,8 +177,8 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      *         above.
      * @dev Unrestricted caller; the owner signature carries authorization, so a relayer can fan the same
      *      bytes out to every chain.
-     * @dev Check order: non-empty batch, expiry, salt unused (shared registry with recovery ceremonies —
-     *      single-use per chain, reusable across chains), signer is a CURRENT owner (a removed owner's
+     * @dev Check order: non-empty batch, expiry, salt unused (the admin-batch registry, separate from
+     *      ceremony salts — single-use per chain, reusable across chains), signer is a CURRENT owner (a removed owner's
      *      signatures die automatically), proof verifies over the chain-agnostic digest.
      * @dev The salt is then consumed and the ops applied in signed order, atomically: any failing op
      *      reverts the whole batch on this chain.
@@ -203,7 +211,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
         if (block.timestamp > expiry) {
             revert JustaRecoveryManager_ProofsExpired(expiry);
         }
-        if (_usedSalts[account][salt]) {
+        if (_usedAdminSalts[account][salt]) {
             revert JustaRecoveryManager_SaltAlreadyUsed(account, salt);
         }
 
@@ -219,7 +227,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
             revert JustaRecoveryManager_InvalidOwnerProof();
         }
 
-        _usedSalts[account][salt] = true;
+        _usedAdminSalts[account][salt] = true;
 
         // Apply in signed order, atomically: one failing op reverts the whole batch, so it can never land
         // half-applied (per-chain all-or-nothing keeps chains in sync).
@@ -476,10 +484,17 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     }
 
     /**
-     * @notice Whether `salt` has been consumed for `account` on this chain.
+     * @notice Whether `salt` has been consumed by a recovery ceremony for `account` on this chain.
      */
     function isSaltUsed(address account, bytes32 salt) external view returns (bool) {
         return _usedSalts[account][salt];
+    }
+
+    /**
+     * @notice Whether `salt` has been consumed by a signed admin batch for `account` on this chain.
+     */
+    function isAdminSaltUsed(address account, bytes32 salt) external view returns (bool) {
+        return _usedAdminSalts[account][salt];
     }
 
     /**
