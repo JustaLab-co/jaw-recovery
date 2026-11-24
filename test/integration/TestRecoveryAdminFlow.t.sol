@@ -156,11 +156,14 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(
-            eoaRecoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            eoaRecoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
         approvals[1] = createApproval(
             passkeyRecoveryId,
-            signWebAuthnProof(provider.recoverDigest(account, subject, ceremonySalt, ceremonyExpiry), PASSKEY_PK)
+            signWebAuthnProof(
+                provider.recoverDigest(address(manager), account, subject, ceremonySalt, ceremonyExpiry), PASSKEY_PK
+            )
         );
 
         bytes32 requestId = manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals);
@@ -301,7 +304,8 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
-            recoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            recoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
 
         bytes32 requestId = manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals);
@@ -385,7 +389,8 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         // The attack now lands, under exactly the requestId the veto was signed for.
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
-            recoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            recoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
         assertEq(manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals), requestId);
 
@@ -659,7 +664,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
             keccak256("any-recovery-id"),
-            signRecoverProof(provider, codeless, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            signRecoverProof(provider, address(manager), codeless, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
 
         // Same empty-revert pin as above: the extcodesize guard carries no return data.

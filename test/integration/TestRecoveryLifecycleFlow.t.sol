@@ -101,7 +101,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory subject = encodeEoaSubject(newOwner);
         bytes32 salt = keccak256("salt-eoa-owner");
         uint256 expiry = block.timestamp + 7 days;
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -156,7 +156,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory subject = encodePasskeySubject(x, y);
         bytes32 salt = keccak256("salt-passkey-owner");
         uint256 expiry = block.timestamp + 7 days;
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -208,7 +208,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory proof = _signPasskeyGuardianProof(account, subject, salt, expiry);
 
         // Sanity: the very same proof genuinely verifies through the guardian's own ERC-1271 door...
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(address(manager), account, subject, salt, expiry);
         assertTrue(guardian.isValidSignature(digest, proof) == ERC1271_MAGIC);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
@@ -301,8 +301,9 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         uint256 expiry = block.timestamp + 7 days;
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
-        approvals[0] =
-            createApproval(recoveryId, signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk));
+        approvals[0] = createApproval(
+            recoveryId, signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk)
+        );
 
         bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
         uint64 executeAt = manager.recoveryRequest(requestId).executeAt;
@@ -365,7 +366,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         view
         returns (bytes32)
     {
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(address(manager), account, subject, salt, expiry);
 
         ERC7739Utils.DomainData memory domainData;
         domainData.name = "JustanAccount";

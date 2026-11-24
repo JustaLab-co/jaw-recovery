@@ -117,7 +117,7 @@ struct RecoveryRequest {
 
 - **`recoveryId`** = `keccak256(abi.encode(account, provider, commitment))` — identifies a registered recovery. Account-scoped, so the same factor under two accounts yields different ids.
 - **`requestId`** = `keccak256(abi.encode(account, subject, salt))` — identifies a queued request; deterministic, single-use (the salt is consumed), and **identical on every chain** for one ceremony.
-- **`SignatureRecoveryProvider.RECOVER_TYPEHASH`** = `keccak256("Recover(address account,bytes subject,bytes32 salt,uint256 expiry)")`.
+- **`SignatureRecoveryProvider.RECOVER_TYPEHASH`** = `keccak256("Recover(address manager,address account,bytes subject,bytes32 salt,uint256 expiry)")`.
 
 ## Key Functions
 

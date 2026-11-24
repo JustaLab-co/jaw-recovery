@@ -63,7 +63,7 @@ contract TestRecoveryBatchFlow is Test, PrepareRecovery {
         bytes memory subject = encodeEoaSubject(newOwner);
         bytes32 salt = keccak256("salt-batch");
         uint256 expiry = block.timestamp + 7 days;
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);

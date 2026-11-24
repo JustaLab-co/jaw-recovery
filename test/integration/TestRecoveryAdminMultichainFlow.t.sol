@@ -304,10 +304,16 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(
-            firstId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, EOA_GUARDIAN_PK)
+            firstId,
+            signRecoverProof(
+                provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, EOA_GUARDIAN_PK
+            )
         );
         approvals[1] = createApproval(
-            secondId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, SECOND_GUARDIAN_PK)
+            secondId,
+            signRecoverProof(
+                provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, SECOND_GUARDIAN_PK
+            )
         );
 
         uint256 t0 = block.timestamp;
@@ -620,10 +626,12 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         (bytes32 eoaId, bytes32 passkeyId) = _guardianIds(account);
 
         approvals = new IRecoveryManager.Approval[](2);
-        approvals[0] =
-            createApproval(eoaId, signRecoverProof(provider, account, subject, salt, expiry, EOA_GUARDIAN_PK));
+        approvals[0] = createApproval(
+            eoaId, signRecoverProof(provider, address(manager), account, subject, salt, expiry, EOA_GUARDIAN_PK)
+        );
         approvals[1] = createApproval(
-            passkeyId, signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK)
+            passkeyId,
+            signWebAuthnProof(provider.recoverDigest(address(manager), account, subject, salt, expiry), PASSKEY_PK)
         );
     }
 

@@ -53,7 +53,7 @@ contract TestRecoveryReplayFlow is Test, PrepareRecovery {
     ///      over the ceremony `salt` with `recoveryEoaPk`.
     function _recoverTo(bytes32 recoveryId, uint256 recoveryEoaPk, address newOwner, bytes32 salt) private {
         bytes memory subject = encodeEoaSubject(newOwner);
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -86,7 +86,7 @@ contract TestRecoveryReplayFlow is Test, PrepareRecovery {
 
         bytes memory subject = encodeEoaSubject(newOwner);
         bytes32 salt = keccak256("salt-replay");
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -166,7 +166,7 @@ contract TestRecoveryReplayFlow is Test, PrepareRecovery {
 
         // Queue a request under the first ceremony salt, then cancel it as the account.
         bytes32 salt = keccak256("salt-cancel");
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
 
@@ -184,7 +184,8 @@ contract TestRecoveryReplayFlow is Test, PrepareRecovery {
 
         // (b) A fresh ceremony (new salt) for the SAME subject, signed anew, queues under a new request id.
         bytes32 freshSalt = keccak256("salt-cancel-fresh");
-        bytes memory freshProof = signRecoverProof(provider, account, subject, freshSalt, expiry, recoveryEoaPk);
+        bytes memory freshProof =
+            signRecoverProof(provider, address(manager), account, subject, freshSalt, expiry, recoveryEoaPk);
         IRecoveryManager.Approval[] memory freshApprovals = new IRecoveryManager.Approval[](1);
         freshApprovals[0] = createApproval(recoveryId, freshProof);
 
@@ -192,6 +193,62 @@ contract TestRecoveryReplayFlow is Test, PrepareRecovery {
         assertTrue(freshRequestId != requestId);
         assertEq(manager.recoveryRequest(freshRequestId).account, account);
         assertTrue(manager.isSaltUsed(account, freshSalt));
+    }
+
+    /**
+     * @notice A ceremony signed for one manager cannot be replayed on a second manager that shares the same
+     *         provider and the same guardian.
+     * @dev Providers are reusable across managers, and each manager tracks consumed salts on its own, so
+     *      the salt alone cannot stop this replay: the second manager has never seen it. What stops it is
+     *      the provider binding the calling manager into the guardian digest. The second manager is given
+     *      delay 0 on purpose — without the binding, the ceremony meant for the time-locked manager would
+     *      execute there instantly.
+     */
+    function test_ShouldRejectCeremonyReplayedOnAnotherManagerSharingTheProvider(
+        address newOwner,
+        uint256 recoveryEoaPk
+    )
+        public
+    {
+        JustaRecoveryManager otherManager = new JustaRecoveryManager();
+
+        vm.assume(newOwner != address(0) && newOwner != account);
+        vm.assume(newOwner != address(manager) && newOwner != address(otherManager));
+        recoveryEoaPk = bound(recoveryEoaPk, 1, SECP256K1_CURVE_ORDER - 1);
+        bytes memory commitment = encodeEoaCommitment(vm.addr(recoveryEoaPk));
+
+        // The account is enrolled on BOTH managers with the SAME guardian on the SAME provider.
+        vm.startPrank(account);
+        JustanAccount(account).addOwnerAddress(address(otherManager));
+        bytes32 recoveryId = manager.addRecovery(account, address(provider), commitment, 3 days);
+        bytes32 otherRecoveryId = otherManager.addRecovery(account, address(provider), commitment, 0);
+        vm.stopPrank();
+
+        bytes memory subject = encodeEoaSubject(newOwner);
+        bytes32 salt = keccak256("salt-cross-manager");
+
+        // The guardian signs ONE ceremony, for the time-locked manager.
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
+
+        // Replayed on the other manager (unused salt there, same guardian registered): rejected.
+        IRecoveryManager.Approval[] memory otherApprovals = new IRecoveryManager.Approval[](1);
+        otherApprovals[0] = createApproval(otherRecoveryId, proof);
+        vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
+        otherManager.requestRecovery(account, subject, salt, expiry, otherApprovals);
+        assertFalse(otherManager.isSaltUsed(account, salt));
+
+        // On the manager it was signed for, it queues normally.
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, proof);
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
+        assertTrue(manager.isSaltUsed(account, salt));
+
+        // And the other manager still works with a proof signed for it.
+        otherApprovals[0] = createApproval(
+            otherRecoveryId,
+            signRecoverProof(provider, address(otherManager), account, subject, salt, expiry, recoveryEoaPk)
+        );
+        otherManager.requestRecovery(account, subject, salt, expiry, otherApprovals);
     }
 
 }

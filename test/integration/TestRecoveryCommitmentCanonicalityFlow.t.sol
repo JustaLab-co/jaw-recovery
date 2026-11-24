@@ -124,7 +124,7 @@ contract TestRecoveryCommitmentCanonicalityFlow is Test, PrepareRecovery {
         uint256 expiry = block.timestamp + 7 days;
 
         // The attacker holds one valid signature from `recoveryEoa` and reuses it for both slots.
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(canonicalId, proof); // 32B slot verifies the ECDSA proof
@@ -169,7 +169,7 @@ contract TestRecoveryCommitmentCanonicalityFlow is Test, PrepareRecovery {
         uint256 expiry = block.timestamp + 7 days;
 
         // The attacker holds one valid ECDSA signature from `recoveryEoa` and reuses it for both slots.
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(canonicalId, proof); // 32B slot verifies the ECDSA proof
@@ -180,6 +180,8 @@ contract TestRecoveryCommitmentCanonicalityFlow is Test, PrepareRecovery {
         // would look identical if the canonical slot were the one failing, and the test would pass while
         // proving nothing about the padded slot. This plain call reverts unless the reused proof genuinely
         // satisfies the canonical 32-byte slot, which is the premise of the whole attack.
+        // (Pranked as the manager: the proof binds the manager that will call `verify`.)
+        vm.prank(address(manager));
         provider.verify(account, subject, salt, expiry, canonical, proof);
 
         // The zero-padded slot routes to WebAuthn and the reused ECDSA bytes are not a valid assertion, so it

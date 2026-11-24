@@ -96,8 +96,10 @@ contract TestRecoveryThresholdFlow is Test, PrepareRecovery {
 
         // Two distinct recoveries each sign the same ceremony (subject, salt, expiry).
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
-        approvals[0] = createApproval(idA, signRecoverProof(provider, account, subject, salt, expiry, pkA));
-        approvals[1] = createApproval(idB, signRecoverProof(provider, account, subject, salt, expiry, pkB));
+        approvals[0] =
+            createApproval(idA, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkA));
+        approvals[1] =
+            createApproval(idB, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkB));
 
         bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
         manager.executeRecoveryRequest(requestId); // delay 0 -> executable immediately
@@ -148,9 +150,9 @@ contract TestRecoveryThresholdFlow is Test, PrepareRecovery {
         bytes32 salt = keccak256("salt-threshold-maxdelay");
 
         IRecoveryManager.Approval memory approvalA =
-            createApproval(idA, signRecoverProof(provider, account, subject, salt, expiry, pkA));
+            createApproval(idA, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkA));
         IRecoveryManager.Approval memory approvalB =
-            createApproval(idB, signRecoverProof(provider, account, subject, salt, expiry, pkB));
+            createApproval(idB, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkB));
 
         // The larger-delay approval sits first or last depending on the fuzzed `swapOrder`: the caller picks
         // the order, so the max must govern either way (see the @dev note above).
@@ -217,8 +219,10 @@ contract TestRecoveryThresholdFlow is Test, PrepareRecovery {
 
         // First approval is valid (A); the second is signed by the wrong key, so B's proof is forged.
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
-        approvals[0] = createApproval(idA, signRecoverProof(provider, account, subject, salt, expiry, pkA));
-        approvals[1] = createApproval(idB, signRecoverProof(provider, account, subject, salt, expiry, pkWrong));
+        approvals[0] =
+            createApproval(idA, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkA));
+        approvals[1] =
+            createApproval(idB, signRecoverProof(provider, address(manager), account, subject, salt, expiry, pkWrong));
 
         // The real provider rejects the forged proof and the entire request reverts.
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);

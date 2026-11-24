@@ -153,7 +153,8 @@ contract TestRecoveryMultichainFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
-            recoveryId, signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK)
+            recoveryId,
+            signWebAuthnProof(provider.recoverDigest(address(manager), account, subject, salt, expiry), PASSKEY_PK)
         );
 
         bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
@@ -186,19 +187,19 @@ contract TestRecoveryMultichainFlow is Test, PrepareRecovery {
         IRecoveryManager.Approval[] memory approvals = _ceremonyApprovals(account, subject, salt, expiry);
 
         // The ambient-chain digest, captured before either chain is simulated.
-        bytes32 d0 = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 d0 = provider.recoverDigest(address(manager), account, subject, salt, expiry);
 
         uint256 snapshot = vm.snapshotState();
 
         // Chain A consumes the ceremony while it is fresh.
         vm.chainId(MAINNET_ETH_CHAIN_ID);
-        assertEq(provider.recoverDigest(account, subject, salt, expiry), d0);
+        assertEq(provider.recoverDigest(address(manager), account, subject, salt, expiry), d0);
         manager.requestRecovery(account, subject, salt, expiry, approvals);
 
         // Chain B never consumed it — but past expiry the proofs are dead there too.
         vm.revertToState(snapshot);
         vm.chainId(OPTIMISM_CHAIN_ID);
-        assertEq(provider.recoverDigest(account, subject, salt, expiry), d0);
+        assertEq(provider.recoverDigest(address(manager), account, subject, salt, expiry), d0);
         assertFalse(manager.isSaltUsed(account, salt));
 
         vm.warp(expiry + 1);
@@ -321,10 +322,12 @@ contract TestRecoveryMultichainFlow is Test, PrepareRecovery {
             manager.computeRecoveryId(account, address(provider), encodePasskeyCommitment(bytes32(x), bytes32(y)));
 
         approvals = new IRecoveryManager.Approval[](2);
-        approvals[0] =
-            createApproval(eoaId, signRecoverProof(provider, account, subject, salt, expiry, EOA_GUARDIAN_PK));
+        approvals[0] = createApproval(
+            eoaId, signRecoverProof(provider, address(manager), account, subject, salt, expiry, EOA_GUARDIAN_PK)
+        );
         approvals[1] = createApproval(
-            passkeyId, signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK)
+            passkeyId,
+            signWebAuthnProof(provider.recoverDigest(address(manager), account, subject, salt, expiry), PASSKEY_PK)
         );
     }
 

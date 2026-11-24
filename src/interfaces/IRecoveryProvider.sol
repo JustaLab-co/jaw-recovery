@@ -15,6 +15,8 @@ pragma solidity 0.8.30;
  *        - bind the proof to all of `(account, subject, salt, expiry)`, so it cannot be reused across
  *          accounts, target owners, or ceremonies, and a relayer cannot substitute a salt or expiry other
  *          than the one the guardians authorized;
+ *        - bind the proof to the calling manager (`msg.sender`). Consumed salts are tracked per manager,
+ *          so a proof that does not name its manager is valid on every manager the account is enrolled on;
  *        - verify against `commitment` such that a proof is valid for exactly one commitment. Otherwise one
  *          factor could satisfy several recoveries of the same provider in one request, silently weakening
  *          an M-of-N threshold.
