@@ -377,9 +377,10 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
         address account = request.account;
         bytes memory subject = request.subject;
 
-        // The owner-add calls below return nothing, so Solidity emits no code-existence check: against a
-        // codeless account they would succeed vacuously, burning the request while adding no owner.
-        // Reachable only if a 7702 delegation was revoked during the time-lock.
+        // A codeless account can never register the owner. Solidity's own code-existence check would
+        // already revert the owner-add calls below (and roll back the delete); checking here first
+        // surfaces a typed error instead of an empty revert. Reachable only if a 7702 delegation was
+        // revoked during the time-lock.
         if (account.code.length == 0) {
             revert JustaRecoveryManager_AccountHasNoCode(account);
         }

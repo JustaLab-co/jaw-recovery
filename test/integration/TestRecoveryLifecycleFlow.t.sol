@@ -264,11 +264,10 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
     /**
      * @notice If the 7702 delegation is revoked mid-timelock, execution reverts loudly and the queued request
      *         survives, so recovery resumes the moment the delegation returns.
-     * @dev The story SPEC-MULTICHAIN-ADMIN §9a flags: `addOwnerAddress`/`addOwnerPublicKey` return nothing, so
-     *      Solidity emits no code-existence check and a call to a re-codeless address would SUCCEED vacuously
-     *      — request deleted, event emitted, no owner added. The manager's `account.code.length` guard turns
-     *      that silent false success into `JustaRecoveryManager_AccountHasNoCode`, and because the guard fires
-     *      before the CEI delete the pending request is never burned.
+     * @dev The story SPEC-MULTICHAIN-ADMIN §9a flags: a call to a re-codeless address can never add the owner.
+     *      Solidity's code-existence check would already revert it with empty data; the manager's
+     *      `account.code.length` guard turns that into the typed `JustaRecoveryManager_AccountHasNoCode`.
+     *      The whole call reverts, so the pending request is never burned.
      * @dev Where the unit coverage pins this against a mocked address, this proves it on the real delegated
      *      account: the delegation designator is saved, wiped with `vm.etch(account, "")` (the key holder
      *      un-delegating), then etched back verbatim. Re-etching the saved code is the honest equivalent of a
@@ -314,7 +313,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         vm.etch(account, "");
         assertEq(account.code.length, 0);
 
-        // At `executeAt` the guard fires instead of a vacuous success.
+        // At `executeAt` the guard fires with its typed error.
         vm.warp(executeAt);
         vm.expectRevert(
             abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_AccountHasNoCode.selector, account)

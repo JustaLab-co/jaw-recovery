@@ -161,9 +161,9 @@ interface IRecoveryManager {
 
     /**
      * @notice Thrown when `executeRecoveryRequest` targets an account with no code.
-     * @dev The owner-add calls return nothing, so Solidity emits no code-existence check; without this
-     *      guard they would succeed vacuously against a codeless address, deleting the request and
-     *      emitting success while registering no owner.
+     * @dev The owner-add calls would already revert against a codeless address (Solidity checks for code
+     *      before a call whose return data it does not decode); this guard only replaces that empty revert
+     *      with a typed error. The request stays pending either way.
      * @dev Unreachable for CREATE2 accounts (code never disappears); reachable for an EIP-7702 account
      *      whose key holder revoked the delegation during the time-lock.
      * @param account The codeless account.

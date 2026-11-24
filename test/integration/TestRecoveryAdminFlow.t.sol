@@ -629,8 +629,8 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
      *      and resubmit.
      * @dev Pinned precisely BECAUSE the property is emergent rather than an explicit contract check: no
      *      line in `JustaRecoveryManager` tests `account.code.length` on these paths (unlike
-     *      `executeRecoveryRequest`, which needs an explicit guard because `addOwner*` returns nothing), so
-     *      a refactor to a low-level call would silently reopen the vacuous-success hole.
+     *      `executeRecoveryRequest`, which adds an explicit guard purely for a typed error), so a refactor
+     *      to a low-level call would silently open a vacuous-success hole.
      */
     function test_ShouldRevertOnCodelessAccount(uint256 eoaGuardianPk) public {
         eoaGuardianPk = bound(eoaGuardianPk, 1, SECP256K1_CURVE_ORDER - 1);

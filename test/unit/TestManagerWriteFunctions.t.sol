@@ -1654,9 +1654,9 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         vm.warp(manager.recoveryRequest(requestId).executeAt);
 
         // The account loses its code during the time-lock — an EIP-7702 delegation revoked by its key
-        // holder. The owner-add returns nothing, so without this guard the call would succeed vacuously:
-        // request deleted, success event emitted, no owner registered. Reverting keeps the request alive
-        // until the delegation is restored.
+        // holder. The owner-add could never succeed there (Solidity's code-existence check would revert it);
+        // the guard surfaces that as a typed error. Either way the request stays alive until the
+        // delegation is restored.
         vm.etch(account, "");
 
         vm.expectRevert(
