@@ -32,6 +32,8 @@ import { SignatureProofLib } from "./libraries/SignatureProofLib.sol";
  *      `executeRecoveryAdmin` (the multichain door — a batch authorized by a current owner's chain-agnostic
  *      EIP-712 signature, submittable by anyone on every chain). Both dispatch into the same internal
  *      functions, so every invariant holds identically regardless of the door used.
+ * @dev Every state-changing external is `nonReentrant`, so a provider called during `requestRecovery` can
+ *      never trigger a change to the registry, threshold, or pending requests mid-verification.
  * @dev Non-ownable, non-upgradeable, deployed once per chain at a deterministic address.
  *
  * @author JustaLab
@@ -128,6 +130,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     )
         external
         onlyAccount(account)
+        nonReentrant
         returns (bytes32 recoveryId)
     {
         return _addRecovery(account, provider, commitment, delay);
@@ -142,7 +145,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @param account The smart account.
      * @param recoveryId The recovery id to remove.
      */
-    function removeRecovery(address account, bytes32 recoveryId) external onlyAccount(account) {
+    function removeRecovery(address account, bytes32 recoveryId) external onlyAccount(account) nonReentrant {
         _removeRecovery(account, recoveryId);
     }
 
@@ -156,7 +159,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @param account The smart account.
      * @param threshold The number of distinct recoveries required to approve a request.
      */
-    function setRecoveryThreshold(address account, uint256 threshold) external onlyAccount(account) {
+    function setRecoveryThreshold(address account, uint256 threshold) external onlyAccount(account) nonReentrant {
         _setRecoveryThreshold(account, threshold);
     }
 
@@ -408,7 +411,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @dev Callable only by the account named in the request (msg.sender == request.account).
      * @param requestId The id of the pending recovery request to cancel.
      */
-    function cancelRecoveryRequest(bytes32 requestId) external {
+    function cancelRecoveryRequest(bytes32 requestId) external nonReentrant {
         _cancelRecoveryRequest(msg.sender, requestId);
     }
 
