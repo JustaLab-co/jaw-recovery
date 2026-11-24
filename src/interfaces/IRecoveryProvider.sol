@@ -11,7 +11,7 @@ pragma solidity 0.8.30;
  *      job is to answer — for a given commitment — whether a proof authorizes recovering `account` to the
  *      new owner encoded in `subject`.
  * @dev All implementations MUST:
- *        - revert on an invalid proof, and return (no value) on success;
+ *        - revert on an invalid proof, and return `IRecoveryProvider.verify.selector` on success;
  *        - bind the proof to all of `(account, subject, salt, expiry)`, so it cannot be reused across
  *          accounts, target owners, or ceremonies, and a relayer cannot substitute a salt or expiry other
  *          than the one the guardians authorized;
@@ -38,6 +38,9 @@ interface IRecoveryProvider {
     /**
      * @notice Verify that `proof` authorizes recovering `account` to the owner encoded in `subject`,
      *         against the recovery `commitment`. MUST revert if it does not.
+     * @dev The magic return value makes the manager fail closed: an address that is a contract but not a
+     *      provider (e.g. one with a permissive fallback) returns nothing or the wrong value, so its
+     *      "approval" is rejected instead of silently accepting every proof.
      * @param account The smart account being recovered.
      * @param subject The new-owner payload (opaque to the provider; bound by the proof).
      * @param salt The ceremony's single-use salt; consumed per chain by the manager, bound by the proof.
@@ -45,6 +48,7 @@ interface IRecoveryProvider {
      * @param commitment The recovery commitment this proof is checked against (e.g. an EOA, a passkey
      *        public key, an email hash).
      * @param proof Provider-specific proof.
+     * @return magicValue `IRecoveryProvider.verify.selector` when the proof is valid.
      */
     function verify(
         address account,
@@ -54,6 +58,7 @@ interface IRecoveryProvider {
         bytes calldata commitment,
         bytes calldata proof
     )
-        external;
+        external
+        returns (bytes4 magicValue);
 
 }

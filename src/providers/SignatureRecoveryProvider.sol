@@ -79,6 +79,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      *        `abi.encode(x, y)` (raw passkey public key).
      * @param proof A 64/65-byte ECDSA signature (EOA guardian), or an ABI-encoded WebAuthn assertion
      *        whose challenge is the canonical digest (passkey guardian).
+     * @return magicValue `IRecoveryProvider.verify.selector` when the proof is valid.
      */
     function verify(
         address account,
@@ -89,6 +90,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         bytes calldata proof
     )
         external
+        returns (bytes4 magicValue)
     {
         bytes32 digest = _recoverDigest(account, subject, salt, expiry);
 
@@ -115,6 +117,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         } else {
             revert SignatureRecoveryProvider_InvalidCommitment();
         }
+
+        return IRecoveryProvider.verify.selector;
     }
 
     ////////////////////////////////////////////////////////////////////////

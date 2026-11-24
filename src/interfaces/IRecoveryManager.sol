@@ -139,6 +139,14 @@ interface IRecoveryManager {
     error JustaRecoveryManager_SubjectAlreadyOwner(bytes subject);
 
     /**
+     * @notice Thrown when a provider's `verify` returns without the expected magic value.
+     * @dev Guards against a registered address that is a contract but not a provider: a permissive
+     *      fallback would otherwise make every proof look valid.
+     * @param provider The provider that returned the wrong value.
+     */
+    error JustaRecoveryManager_InvalidProviderResponse(address provider);
+
+    /**
      * @notice Thrown when a request id does not correspond to a pending recovery request.
      * @param requestId The recovery request id.
      */

@@ -25,7 +25,8 @@ import { SignatureProofLib } from "./libraries/SignatureProofLib.sol";
  * @dev The manager owns all state — recoveries & commitments, the approval threshold, the per-recovery
  *      delays, and the per-account used-salt registry — and treats providers as stateless verifiers: on
  *      each approval it calls `provider.verify(account, subject, salt, expiry, commitment, proof)`, which
- *      reverts on an invalid proof. Provider trust is therefore equivalent to provider correctness.
+ *      reverts on an invalid proof and returns a magic value on a valid one. Provider trust is therefore
+ *      equivalent to provider correctness.
  * @dev Recovery administration has TWO authorization doors over one shared implementation: the
  *      `onlyAccount` externals (the single-chain door — a plain call/userop from the account itself) and
  *      `executeRecoveryAdmin` (the multichain door — a batch authorized by a current owner's chain-agnostic
@@ -330,9 +331,14 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
                 maxDelay = recovery.delay;
             }
 
-            // Delegate verification; the provider reverts on an invalid proof.
-            IRecoveryProvider(recovery.provider)
+            // Delegate verification; the provider reverts on an invalid proof and returns the magic value
+            // on a valid one. Requiring the value fails closed against a registered address that is not a
+            // provider (e.g. a contract with a permissive fallback), which would otherwise accept any proof.
+            bytes4 magicValue = IRecoveryProvider(recovery.provider)
                 .verify(account, subject, salt, expiry, recovery.commitment, approvals[i].proof);
+            if (magicValue != IRecoveryProvider.verify.selector) {
+                revert JustaRecoveryManager_InvalidProviderResponse(recovery.provider);
+            }
         }
 
         requestId = keccak256(abi.encode(account, subject, salt));

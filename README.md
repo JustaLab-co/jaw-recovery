@@ -53,11 +53,11 @@ interface IRecoveryProvider {
         uint256 expiry,
         bytes calldata commitment,
         bytes calldata proof
-    ) external;
+    ) external returns (bytes4 magicValue);
 }
 ```
 
-All implementations MUST revert on an invalid proof, bind the proof to all of `(account, subject, salt, expiry)`, and verify against exactly one `commitment` (so one proof cannot satisfy several recoveries of the same provider). Providers shipped in this repository MUST additionally be **multichain**: derive the proven message exclusively from that chain-agnostic tuple (never `block.chainid`), never route verification through a chain-binding intermediary (e.g. a third-party ERC-1271 door), and deploy deterministically at the same address on every chain. Third-party providers MAY be chain-bound; their factors are then valid on a single chain only.
+All implementations MUST revert on an invalid proof and return `IRecoveryProvider.verify.selector` on a valid one (the manager rejects any other return, so an address that is not a provider fails closed), bind the proof to all of `(account, subject, salt, expiry)`, and verify against exactly one `commitment` (so one proof cannot satisfy several recoveries of the same provider). Providers shipped in this repository MUST additionally be **multichain**: derive the proven message exclusively from that chain-agnostic tuple (never `block.chainid`), never route verification through a chain-binding intermediary (e.g. a third-party ERC-1271 door), and deploy deterministically at the same address on every chain. Third-party providers MAY be chain-bound; their factors are then valid on a single chain only.
 
 ### SignatureRecoveryProvider (Canonical Provider)
 

@@ -6,6 +6,7 @@ import { Test } from "forge-std/Test.sol";
 import { P256 } from "solady/utils/P256.sol";
 
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
+import { IRecoveryProvider } from "../../src/interfaces/IRecoveryProvider.sol";
 import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
 
 contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
@@ -262,7 +263,9 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // digest but never enforces the clock, which is the manager's job.
         bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, guardianPk);
 
-        provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
+        bytes4 magicValue =
+            provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
+        assertEq(magicValue, IRecoveryProvider.verify.selector);
     }
 
     function test_Verify_ShouldAcceptCompactSignature(
@@ -410,7 +413,9 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // keeps the proof free of any chain binding.
         bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
 
-        provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
+        bytes4 magicValue =
+            provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
+        assertEq(magicValue, IRecoveryProvider.verify.selector);
     }
 
     function test_Verify_ShouldAcceptPasskeyProofUnderDifferentChainIds(

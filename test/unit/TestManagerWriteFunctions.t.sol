@@ -52,7 +52,11 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
 
     /// @dev Stubs `verify` on `provider` to accept (return). Reachable only after the provider is etched.
     function _acceptVerify(address provider) private {
-        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), "");
+        vm.mockCall(
+            provider,
+            abi.encodeWithSelector(IRecoveryProvider.verify.selector),
+            abi.encode(IRecoveryProvider.verify.selector)
+        );
     }
 
     /// @dev Etches `account` (so the `isOwnerAddress` call's extcodesize check passes) and stubs that call to
@@ -1334,6 +1338,71 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
 
         vm.expectRevert(rejection);
         manager.requestRecovery(account, subject, salt, expiry, approvals);
+    }
+
+    function test_RequestRecovery_RevertIfProviderReturnsWrongMagicValue(
+        address account,
+        address provider,
+        address newOwner,
+        bytes calldata commitment,
+        bytes32 salt,
+        uint256 expiry,
+        bytes4 wrongValue
+    )
+        public
+    {
+        vm.assume(commitment.length != 0);
+        vm.assume(expiry > block.timestamp);
+        vm.assume(wrongValue != IRecoveryProvider.verify.selector);
+
+        bytes32 recoveryId = _addRecovery(account, provider, commitment, 0);
+        _stubAccount(account, false);
+
+        // The provider returns without reverting, but not with the magic value: not a valid approval.
+        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), abi.encode(wrongValue));
+
+        vm.assume(newOwner != address(0));
+        bytes memory subject = encodeEoaSubject(newOwner);
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, "");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_InvalidProviderResponse.selector, provider)
+        );
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
+
+        assertFalse(manager.isSaltUsed(account, salt));
+    }
+
+    function test_RequestRecovery_RevertIfProviderReturnsNothing(
+        address account,
+        address provider,
+        address newOwner,
+        bytes calldata commitment,
+        bytes32 salt,
+        uint256 expiry
+    )
+        public
+    {
+        vm.assume(commitment.length != 0);
+        vm.assume(expiry > block.timestamp);
+
+        bytes32 recoveryId = _addRecovery(account, provider, commitment, 0);
+        _stubAccount(account, false);
+
+        // A contract with a permissive fallback: the call succeeds with empty returndata. It must not
+        // count as an approval (the ABI decoder rejects the missing return value).
+        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), "");
+
+        vm.assume(newOwner != address(0));
+        bytes memory subject = encodeEoaSubject(newOwner);
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, "");
+
+        vm.expectRevert();
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
+
+        assertFalse(manager.isSaltUsed(account, salt));
     }
 
     function test_RequestRecovery_ShouldUseMaxDelay(
