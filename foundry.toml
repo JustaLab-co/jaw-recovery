@@ -20,6 +20,13 @@ via_ir = true
 [fuzz]
 runs = 256
 
+[invariant]
+# Each `invariant_*` function plays `runs` random sequences of `depth` handler calls.
+runs = 256
+depth = 100
+# The handler catches every expected revert itself, so one that escapes it is a broken test.
+fail_on_revert = true
+
 [fmt]
 # Line length configuration
 line_length = 120
