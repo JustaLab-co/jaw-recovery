@@ -22,12 +22,13 @@ pragma solidity 0.8.30;
  *          an M-of-N threshold.
  * @dev Canonical providers (shipped by JustaLab) MUST additionally be multichain — one guardian signature
  *      valid on every enrolled chain:
- *        - derive the proven message exclusively from `(account, subject, salt, expiry)`; never read
- *          `block.chainid` into it;
+ *        - derive the proven message exclusively from `(manager, account, subject, salt, expiry)`, where
+ *          `manager` is the calling manager; never read `block.chainid` into it;
  *        - never route verification through a chain-binding intermediary (e.g. the ERC-1271 door of a
  *          contract the provider does not control);
  *        - deploy deterministically at the same address on every chain (the signing domain binds the
- *          verifying contract's address);
+ *          verifying contract's address). The manager must be at the same address on every chain too:
+ *          it is part of the signed message, so one signature only verifies everywhere if it is;
  *        - keep any provider-internal freshness checks chain-independent.
  *      Third-party providers MAY be chain-bound; their factors are then valid on a single chain only.
  * @dev Implementations MAY enforce stricter freshness than the manager's `expiry` (e.g. a DKIM timestamp
