@@ -153,14 +153,14 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         assertTrue(manager.hasRecovery(account, passkeyId));
         assertEq(manager.recoveryCount(account), 2);
         assertEq(manager.recoveryThreshold(account), 2);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
 
         // ----- Chain B: same addresses, independently diverged state -----
         vm.revertToState(snapshot);
         vm.chainId(OPTIMISM_CHAIN_ID);
 
         // Chain B never saw the batch: its salt is fresh and nothing is configured there.
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
         assertFalse(manager.hasRecovery(account, eoaId));
         assertFalse(manager.hasRecovery(account, passkeyId));
         assertEq(manager.recoveryCount(account), 0);
@@ -174,7 +174,7 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         assertTrue(manager.hasRecovery(account, passkeyId));
         assertEq(manager.recoveryCount(account), 2);
         assertEq(manager.recoveryThreshold(account), 2);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
     }
 
     /**
@@ -225,7 +225,7 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, cancelSalt, adminExpiry, adminOwnerBytes, proof);
         assertEq(manager.recoveryRequest(requestId).account, address(0));
-        assertTrue(manager.isSaltUsed(account, cancelSalt));
+        assertTrue(manager.isAdminSaltUsed(account, cancelSalt));
 
         // Even once the time-lock has elapsed there is nothing left to execute.
         vm.warp(executeAtA);
@@ -241,7 +241,7 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         vm.chainId(OPTIMISM_CHAIN_ID);
 
         assertFalse(manager.isSaltUsed(account, ceremonySalt));
-        assertFalse(manager.isSaltUsed(account, cancelSalt));
+        assertFalse(manager.isAdminSaltUsed(account, cancelSalt));
         assertEq(manager.recoveryRequest(requestId).account, address(0));
 
         assertEq(manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals), requestId);
@@ -304,10 +304,16 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(
-            firstId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, EOA_GUARDIAN_PK)
+            firstId,
+            signRecoverProof(
+                provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, EOA_GUARDIAN_PK
+            )
         );
         approvals[1] = createApproval(
-            secondId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, SECOND_GUARDIAN_PK)
+            secondId,
+            signRecoverProof(
+                provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, SECOND_GUARDIAN_PK
+            )
         );
 
         uint256 t0 = block.timestamp;
@@ -330,7 +336,7 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         vm.warp(t0);
         vm.chainId(OPTIMISM_CHAIN_ID);
 
-        assertFalse(manager.isSaltUsed(account, adminSalt));
+        assertFalse(manager.isAdminSaltUsed(account, adminSalt));
         assertFalse(manager.hasRecovery(account, secondId));
         assertEq(manager.recoveryCount(account), 1);
         assertEq(manager.recoveryThreshold(account), 1);
@@ -540,7 +546,7 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         // Opted in here too by construction, and nothing else has happened yet.
         assertTrue(account.isOwnerAddress(address(manager)));
         assertFalse(account.isOwnerBytes(subject));
-        assertFalse(manager.isSaltUsed(address(account), adminSalt));
+        assertFalse(manager.isAdminSaltUsed(address(account), adminSalt));
         assertFalse(manager.isSaltUsed(address(account), ceremonySalt));
 
         vm.prank(relayer);
@@ -620,10 +626,12 @@ contract TestRecoveryAdminMultichainFlow is Test, PrepareRecovery {
         (bytes32 eoaId, bytes32 passkeyId) = _guardianIds(account);
 
         approvals = new IRecoveryManager.Approval[](2);
-        approvals[0] =
-            createApproval(eoaId, signRecoverProof(provider, account, subject, salt, expiry, EOA_GUARDIAN_PK));
+        approvals[0] = createApproval(
+            eoaId, signRecoverProof(provider, address(manager), account, subject, salt, expiry, EOA_GUARDIAN_PK)
+        );
         approvals[1] = createApproval(
-            passkeyId, signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK)
+            passkeyId,
+            signWebAuthnProof(provider.recoverDigest(address(manager), account, subject, salt, expiry), PASSKEY_PK)
         );
     }
 

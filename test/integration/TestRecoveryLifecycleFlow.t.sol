@@ -101,7 +101,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory subject = encodeEoaSubject(newOwner);
         bytes32 salt = keccak256("salt-eoa-owner");
         uint256 expiry = block.timestamp + 7 days;
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -156,7 +156,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory subject = encodePasskeySubject(x, y);
         bytes32 salt = keccak256("salt-passkey-owner");
         uint256 expiry = block.timestamp + 7 days;
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);
@@ -208,7 +208,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         bytes memory proof = _signPasskeyGuardianProof(account, subject, salt, expiry);
 
         // Sanity: the very same proof genuinely verifies through the guardian's own ERC-1271 door...
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(address(manager), account, subject, salt, expiry);
         assertTrue(guardian.isValidSignature(digest, proof) == ERC1271_MAGIC);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
@@ -264,11 +264,10 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
     /**
      * @notice If the 7702 delegation is revoked mid-timelock, execution reverts loudly and the queued request
      *         survives, so recovery resumes the moment the delegation returns.
-     * @dev The story SPEC-MULTICHAIN-ADMIN §9a flags: `addOwnerAddress`/`addOwnerPublicKey` return nothing, so
-     *      Solidity emits no code-existence check and a call to a re-codeless address would SUCCEED vacuously
-     *      — request deleted, event emitted, no owner added. The manager's `account.code.length` guard turns
-     *      that silent false success into `JustaRecoveryManager_AccountHasNoCode`, and because the guard fires
-     *      before the CEI delete the pending request is never burned.
+     * @dev The story SPEC-MULTICHAIN-ADMIN §9a flags: a call to a re-codeless address can never add the owner.
+     *      Solidity's code-existence check would already revert it with empty data; the manager's
+     *      `account.code.length` guard turns that into the typed `JustaRecoveryManager_AccountHasNoCode`.
+     *      The whole call reverts, so the pending request is never burned.
      * @dev Where the unit coverage pins this against a mocked address, this proves it on the real delegated
      *      account: the delegation designator is saved, wiped with `vm.etch(account, "")` (the key holder
      *      un-delegating), then etched back verbatim. Re-etching the saved code is the honest equivalent of a
@@ -301,8 +300,9 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         uint256 expiry = block.timestamp + 7 days;
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
-        approvals[0] =
-            createApproval(recoveryId, signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk));
+        approvals[0] = createApproval(
+            recoveryId, signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk)
+        );
 
         bytes32 requestId = manager.requestRecovery(account, subject, salt, expiry, approvals);
         uint64 executeAt = manager.recoveryRequest(requestId).executeAt;
@@ -313,7 +313,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         vm.etch(account, "");
         assertEq(account.code.length, 0);
 
-        // At `executeAt` the guard fires instead of a vacuous success.
+        // At `executeAt` the guard fires with its typed error.
         vm.warp(executeAt);
         vm.expectRevert(
             abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_AccountHasNoCode.selector, account)
@@ -365,7 +365,7 @@ contract TestRecoveryLifecycleFlow is Test, PrepareRecovery {
         view
         returns (bytes32)
     {
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(address(manager), account, subject, salt, expiry);
 
         ERC7739Utils.DomainData memory domainData;
         domainData.name = "JustanAccount";

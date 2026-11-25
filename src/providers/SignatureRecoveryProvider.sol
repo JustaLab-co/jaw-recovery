@@ -59,9 +59,12 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      * @notice EIP-712 typehash for the Recover struct.
      * @dev All guardians of one ceremony sign this same message; `salt` and `expiry` are enforced by the
      *      manager and only bound here.
+     * @dev `manager` is the recovery manager the ceremony is for (the caller of `verify`). Binding it keeps
+     *      one provider deployment reusable across managers: each manager tracks consumed salts on its
+     *      own, so without it a ceremony would be valid on every manager the account is enrolled on.
      */
     bytes32 public constant RECOVER_TYPEHASH =
-        keccak256("Recover(address account,bytes subject,bytes32 salt,uint256 expiry)");
+        keccak256("Recover(address manager,address account,bytes subject,bytes32 salt,uint256 expiry)");
 
     ////////////////////////////////////////////////////////////////////////
     // EXTERNAL FUNCTIONS
@@ -71,6 +74,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      * @notice Verify a recovery proof against a committed guardian. Reverts on failure.
      * @dev Deliberately non-view to keep provider mutability semantics uniform across implementations
      *      (see IRecoveryProvider); this implementation performs no state changes.
+     * @dev The digest binds `msg.sender` as the manager, so a proof only verifies when the manager the
+     *      guardian signed for is the one calling.
      * @param account The smart account being recovered.
      * @param subject The new-owner payload bound by the signature.
      * @param salt The ceremony's single-use salt, bound by the signature; consumed per chain by the manager.
@@ -79,6 +84,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      *        `abi.encode(x, y)` (raw passkey public key).
      * @param proof A 64/65-byte ECDSA signature (EOA guardian), or an ABI-encoded WebAuthn assertion
      *        whose challenge is the canonical digest (passkey guardian).
+     * @return magicValue `IRecoveryProvider.verify.selector` when the proof is valid.
      */
     function verify(
         address account,
@@ -89,8 +95,9 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         bytes calldata proof
     )
         external
+        returns (bytes4 magicValue)
     {
-        bytes32 digest = _recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = _recoverDigest(msg.sender, account, subject, salt, expiry);
 
         if (commitment.length == 32) {
             // EOA guardian: strict ecrecover only, so a chain-bound smart-account envelope can never
@@ -115,6 +122,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         } else {
             revert SignatureRecoveryProvider_InvalidCommitment();
         }
+
+        return IRecoveryProvider.verify.selector;
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -126,7 +135,8 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      * @dev EOA guardians sign this digest directly; passkey guardians produce a WebAuthn assertion with
      *      `challenge = abi.encode(digest)`.
      * @dev Identical on every chain (the domain omits chainId and this provider deploys at the same
-     *      deterministic address everywhere).
+     *      deterministic address everywhere, as must the manager).
+     * @param manager The recovery manager the ceremony will be submitted to.
      * @param account The smart account being recovered.
      * @param subject The new-owner payload.
      * @param salt The ceremony's single-use salt.
@@ -134,6 +144,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
      * @return The EIP-712 digest to sign.
      */
     function recoverDigest(
+        address manager,
         address account,
         bytes calldata subject,
         bytes32 salt,
@@ -143,7 +154,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         view
         returns (bytes32)
     {
-        return _recoverDigest(account, subject, salt, expiry);
+        return _recoverDigest(manager, account, subject, salt, expiry);
     }
 
     /**
@@ -179,9 +190,10 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
     ////////////////////////////////////////////////////////////////////////
 
     /**
-     * @dev Build the chain-agnostic EIP-712 digest for `(account, subject, salt, expiry)`.
+     * @dev Build the chain-agnostic EIP-712 digest for `(manager, account, subject, salt, expiry)`.
      */
     function _recoverDigest(
+        address manager,
         address account,
         bytes calldata subject,
         bytes32 salt,
@@ -191,7 +203,7 @@ contract SignatureRecoveryProvider is IRecoveryProvider, EIP712 {
         view
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(RECOVER_TYPEHASH, account, keccak256(subject), salt, expiry));
+        bytes32 structHash = keccak256(abi.encode(RECOVER_TYPEHASH, manager, account, keccak256(subject), salt, expiry));
         return _hashTypedDataSansChainId(structHash);
     }
 

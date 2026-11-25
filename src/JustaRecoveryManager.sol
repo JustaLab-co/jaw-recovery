@@ -23,14 +23,17 @@ import { SignatureProofLib } from "./libraries/SignatureProofLib.sol";
  *      keyed by `recoveryId = keccak256(abi.encode(account, provider, commitment))`. The same provider may
  *      back several recoveries for one account.
  * @dev The manager owns all state — recoveries & commitments, the approval threshold, the per-recovery
- *      delays, and the per-account used-salt registry — and treats providers as stateless verifiers: on
+ *      delays, and the per-account used-salt registries — and treats providers as stateless verifiers: on
  *      each approval it calls `provider.verify(account, subject, salt, expiry, commitment, proof)`, which
- *      reverts on an invalid proof. Provider trust is therefore equivalent to provider correctness.
+ *      reverts on an invalid proof and returns a magic value on a valid one. Provider trust is therefore
+ *      equivalent to provider correctness.
  * @dev Recovery administration has TWO authorization doors over one shared implementation: the
  *      `onlyAccount` externals (the single-chain door — a plain call/userop from the account itself) and
  *      `executeRecoveryAdmin` (the multichain door — a batch authorized by a current owner's chain-agnostic
  *      EIP-712 signature, submittable by anyone on every chain). Both dispatch into the same internal
  *      functions, so every invariant holds identically regardless of the door used.
+ * @dev Every state-changing external is `nonReentrant`, so a provider called during `requestRecovery` can
+ *      never trigger a change to the registry, threshold, or pending requests mid-verification.
  * @dev Non-ownable, non-upgradeable, deployed once per chain at a deterministic address.
  *
  * @author JustaLab
@@ -78,13 +81,21 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     mapping(address account => uint256 threshold) internal _recoveryThreshold;
 
     /**
-     * @notice Per-account registry of consumed salts — one namespace shared by recovery ceremonies and
-     *         signed admin batches.
-     * @dev A salt is bound into every proof of its ceremony or admin batch and consumed on success, which
-     *      makes the authorization single-use on this chain while the same bytes stay submittable on chains
-     *      that have not consumed the salt. A ceremony's salt also seeds its deterministic `requestId`.
+     * @notice Per-account registry of salts consumed by recovery ceremonies.
+     * @dev A salt is bound into every proof of its ceremony and consumed on success, which makes the
+     *      proofs single-use on this chain while the same bytes stay submittable on chains that have not
+     *      consumed the salt. The salt also seeds the ceremony's deterministic `requestId`.
      */
     mapping(address account => mapping(bytes32 salt => bool used)) internal _usedSalts;
+
+    /**
+     * @notice Per-account registry of salts consumed by signed admin batches.
+     * @dev Deliberately separate from the ceremony registry. Salts are public once a signature is
+     *      broadcast, so with one shared registry a threshold of guardians could burn the salt of an
+     *      owner's pending admin batch (e.g. a cancel) by submitting a ceremony that reuses it. Each kind of
+     *      authorization can only consume salts of its own kind.
+     */
+    mapping(address account => mapping(bytes32 salt => bool used)) internal _usedAdminSalts;
 
     /**
      * @notice Pending recovery requests keyed by `requestId`.
@@ -127,6 +138,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     )
         external
         onlyAccount(account)
+        nonReentrant
         returns (bytes32 recoveryId)
     {
         return _addRecovery(account, provider, commitment, delay);
@@ -141,7 +153,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @param account The smart account.
      * @param recoveryId The recovery id to remove.
      */
-    function removeRecovery(address account, bytes32 recoveryId) external onlyAccount(account) {
+    function removeRecovery(address account, bytes32 recoveryId) external onlyAccount(account) nonReentrant {
         _removeRecovery(account, recoveryId);
     }
 
@@ -155,7 +167,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @param account The smart account.
      * @param threshold The number of distinct recoveries required to approve a request.
      */
-    function setRecoveryThreshold(address account, uint256 threshold) external onlyAccount(account) {
+    function setRecoveryThreshold(address account, uint256 threshold) external onlyAccount(account) nonReentrant {
         _setRecoveryThreshold(account, threshold);
     }
 
@@ -165,8 +177,8 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      *         above.
      * @dev Unrestricted caller; the owner signature carries authorization, so a relayer can fan the same
      *      bytes out to every chain.
-     * @dev Check order: non-empty batch, expiry, salt unused (shared registry with recovery ceremonies —
-     *      single-use per chain, reusable across chains), signer is a CURRENT owner (a removed owner's
+     * @dev Check order: non-empty batch, expiry, salt unused (the admin-batch registry, separate from
+     *      ceremony salts — single-use per chain, reusable across chains), signer is a CURRENT owner (a removed owner's
      *      signatures die automatically), proof verifies over the chain-agnostic digest.
      * @dev The salt is then consumed and the ops applied in signed order, atomically: any failing op
      *      reverts the whole batch on this chain.
@@ -199,7 +211,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
         if (block.timestamp > expiry) {
             revert JustaRecoveryManager_ProofsExpired(expiry);
         }
-        if (_usedSalts[account][salt]) {
+        if (_usedAdminSalts[account][salt]) {
             revert JustaRecoveryManager_SaltAlreadyUsed(account, salt);
         }
 
@@ -215,7 +227,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
             revert JustaRecoveryManager_InvalidOwnerProof();
         }
 
-        _usedSalts[account][salt] = true;
+        _usedAdminSalts[account][salt] = true;
 
         // Apply in signed order, atomically: one failing op reverts the whole batch, so it can never land
         // half-applied (per-chain all-or-nothing keeps chains in sync).
@@ -330,9 +342,14 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
                 maxDelay = recovery.delay;
             }
 
-            // Delegate verification; the provider reverts on an invalid proof.
-            IRecoveryProvider(recovery.provider)
+            // Delegate verification; the provider reverts on an invalid proof and returns the magic value
+            // on a valid one. Requiring the value fails closed against a registered address that is not a
+            // provider (e.g. a contract with a permissive fallback), which would otherwise accept any proof.
+            bytes4 magicValue = IRecoveryProvider(recovery.provider)
                 .verify(account, subject, salt, expiry, recovery.commitment, approvals[i].proof);
+            if (magicValue != IRecoveryProvider.verify.selector) {
+                revert JustaRecoveryManager_InvalidProviderResponse(recovery.provider);
+            }
         }
 
         requestId = keccak256(abi.encode(account, subject, salt));
@@ -371,9 +388,10 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
         address account = request.account;
         bytes memory subject = request.subject;
 
-        // The owner-add calls below return nothing, so Solidity emits no code-existence check: against a
-        // codeless account they would succeed vacuously, burning the request while adding no owner.
-        // Reachable only if a 7702 delegation was revoked during the time-lock.
+        // A codeless account can never register the owner. Solidity's own code-existence check would
+        // already revert the owner-add calls below (and roll back the delete); checking here first
+        // surfaces a typed error instead of an empty revert. Reachable only if a 7702 delegation was
+        // revoked during the time-lock.
         if (account.code.length == 0) {
             revert JustaRecoveryManager_AccountHasNoCode(account);
         }
@@ -401,7 +419,7 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
      * @dev Callable only by the account named in the request (msg.sender == request.account).
      * @param requestId The id of the pending recovery request to cancel.
      */
-    function cancelRecoveryRequest(bytes32 requestId) external {
+    function cancelRecoveryRequest(bytes32 requestId) external nonReentrant {
         _cancelRecoveryRequest(msg.sender, requestId);
     }
 
@@ -466,10 +484,17 @@ contract JustaRecoveryManager is IRecoveryManager, ReentrancyGuard, EIP712 {
     }
 
     /**
-     * @notice Whether `salt` has been consumed for `account` on this chain.
+     * @notice Whether `salt` has been consumed by a recovery ceremony for `account` on this chain.
      */
     function isSaltUsed(address account, bytes32 salt) external view returns (bool) {
         return _usedSalts[account][salt];
+    }
+
+    /**
+     * @notice Whether `salt` has been consumed by a signed admin batch for `account` on this chain.
+     */
+    function isAdminSaltUsed(address account, bytes32 salt) external view returns (bool) {
+        return _usedAdminSalts[account][salt];
     }
 
     /**

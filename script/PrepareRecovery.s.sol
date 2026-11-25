@@ -93,6 +93,7 @@ contract PrepareRecovery is Script, CodeConstants {
      */
     function signRecoverProof(
         SignatureRecoveryProvider provider,
+        address manager,
         address account,
         bytes memory subject,
         bytes32 salt,
@@ -103,7 +104,7 @@ contract PrepareRecovery is Script, CodeConstants {
         view
         returns (bytes memory proof)
     {
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(manager, account, subject, salt, expiry);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -118,6 +119,7 @@ contract PrepareRecovery is Script, CodeConstants {
      */
     function signRecoverProofCompact(
         SignatureRecoveryProvider provider,
+        address manager,
         address account,
         bytes memory subject,
         bytes32 salt,
@@ -128,7 +130,7 @@ contract PrepareRecovery is Script, CodeConstants {
         view
         returns (bytes memory proof)
     {
-        bytes32 digest = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digest = provider.recoverDigest(manager, account, subject, salt, expiry);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         bytes32 vs = bytes32(uint256(s) | (uint256(v - 27) << 255));
         return abi.encodePacked(r, vs);

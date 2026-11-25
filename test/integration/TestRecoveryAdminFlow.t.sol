@@ -147,7 +147,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         assertTrue(manager.hasRecovery(account, passkeyRecoveryId));
         assertEq(manager.recoveryCount(account), 2);
         assertEq(manager.recoveryThreshold(account), 2);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
 
         // Capstone: the admin-enrolled guardians run a real 2-of-2 ceremony against that configuration.
         bytes memory subject = encodeEoaSubject(newOwner);
@@ -156,11 +156,14 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](2);
         approvals[0] = createApproval(
-            eoaRecoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            eoaRecoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
         approvals[1] = createApproval(
             passkeyRecoveryId,
-            signWebAuthnProof(provider.recoverDigest(account, subject, ceremonySalt, ceremonyExpiry), PASSKEY_PK)
+            signWebAuthnProof(
+                provider.recoverDigest(address(manager), account, subject, ceremonySalt, ceremonyExpiry), PASSKEY_PK
+            )
         );
 
         bytes32 requestId = manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals);
@@ -207,7 +210,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         bytes32 recoveryId = manager.computeRecoveryId(account, address(provider), commitment);
         assertTrue(manager.hasRecovery(account, recoveryId));
         assertEq(manager.getRecovery(account, recoveryId).delay, delay);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
     }
 
     /**
@@ -253,7 +256,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
         assertFalse(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
 
         // The account changes its mind and re-registers the owner. The same signed bytes — never re-signed —
@@ -265,7 +268,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
         assertTrue(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
     }
 
@@ -301,7 +304,8 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
-            recoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            recoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
 
         bytes32 requestId = manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals);
@@ -316,9 +320,9 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, cancelSalt, adminExpiry, adminOwnerBytes, proof);
 
-        // The request is gone; both authorizations are spent on this chain in the one shared salt registry.
+        // The request is gone; both authorizations are spent on this chain, each in its own salt registry.
         assertEq(manager.recoveryRequest(requestId).account, address(0));
-        assertTrue(manager.isSaltUsed(account, cancelSalt));
+        assertTrue(manager.isAdminSaltUsed(account, cancelSalt));
         assertTrue(manager.isSaltUsed(account, ceremonySalt));
 
         // Even once the original time-lock has elapsed there is nothing left to execute.
@@ -329,6 +333,74 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         manager.executeRecoveryRequest(requestId);
 
         assertFalse(JustanAccount(account).isOwnerBytes(subject));
+    }
+
+    /**
+     * @notice A malicious guardian cannot kill the owner's signed cancel by front-running it with a ceremony
+     *         that reuses the cancel batch's salt.
+     * @dev The attack this pins: the guardian queues a takeover; the owner signs a `CANCEL_REQUEST` batch
+     *      whose salt is public the moment a relayer broadcasts it; the guardian (who can sign any ceremony
+     *      it likes) submits a second ceremony under that very salt and gets it mined first. With one salt
+     *      registry shared by both doors the owner's cancel then reverted `SaltAlreadyUsed` and the takeover
+     *      stayed pending — and a backend that reads that revert as "already landed" would report the cancel
+     *      as done. Ceremony salts and admin-batch salts are tracked separately, so the front-run consumes
+     *      nothing the owner's batch needs and the cancel lands.
+     */
+    function test_ShouldLandOwnerCancelDespiteGuardianCeremonyReusingItsSalt(
+        address newOwner,
+        address secondNewOwner,
+        uint256 eoaGuardianPk
+    )
+        public
+    {
+        address payable account = TEST_ACCOUNT_ADDRESS;
+
+        vm.assume(newOwner != address(0) && secondNewOwner != address(0) && newOwner != secondNewOwner);
+        vm.assume(newOwner != account && newOwner != address(manager) && newOwner != adminOwner);
+        vm.assume(secondNewOwner != account && secondNewOwner != address(manager) && secondNewOwner != adminOwner);
+
+        eoaGuardianPk = bound(eoaGuardianPk, 1, SECP256K1_CURVE_ORDER - 1);
+
+        vm.prank(account);
+        bytes32 recoveryId =
+            manager.addRecovery(account, address(provider), encodeEoaCommitment(vm.addr(eoaGuardianPk)), DELAY);
+
+        uint256 ceremonyExpiry = block.timestamp + CEREMONY_EXPIRY_WINDOW;
+
+        // 1. The guardian queues a takeover.
+        bytes memory subject = encodeEoaSubject(newOwner);
+        bytes32 ceremonySalt = keccak256("takeover-ceremony");
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(
+            recoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+        );
+        bytes32 requestId = manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals);
+
+        // 2. The owner signs a cancel batch; its salt becomes public when the relayer broadcasts it.
+        IRecoveryManager.AdminOp[] memory ops = _oneOp(encodeCancelRequestOp(requestId));
+        bytes32 cancelSalt = keccak256("admin-cancel-batch");
+        uint256 adminExpiry = block.timestamp + ADMIN_EXPIRY_WINDOW;
+        bytes memory proof = signAdminProof(manager, account, ops, cancelSalt, adminExpiry, ADMIN_OWNER_PK);
+
+        // 3. The guardian front-runs with a second ceremony that deliberately reuses `cancelSalt`.
+        bytes memory secondSubject = encodeEoaSubject(secondNewOwner);
+        approvals[0] = createApproval(
+            recoveryId,
+            signRecoverProof(
+                provider, address(manager), account, secondSubject, cancelSalt, ceremonyExpiry, eoaGuardianPk
+            )
+        );
+        manager.requestRecovery(account, secondSubject, cancelSalt, ceremonyExpiry, approvals);
+        assertTrue(manager.isSaltUsed(account, cancelSalt));
+        assertFalse(manager.isAdminSaltUsed(account, cancelSalt));
+
+        // 4. The owner's cancel still lands: the ceremony consumed nothing the batch depends on.
+        vm.prank(relayer);
+        manager.executeRecoveryAdmin(account, ops, cancelSalt, adminExpiry, adminOwnerBytes, proof);
+
+        assertEq(manager.recoveryRequest(requestId).account, address(0));
+        assertTrue(manager.isAdminSaltUsed(account, cancelSalt));
     }
 
     /**
@@ -380,12 +452,13 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         manager.executeRecoveryAdmin(account, ops, cancelSalt, adminExpiry, adminOwnerBytes, proof);
 
         // ...and the salt write reverts with it, so the owner is not disarmed by losing the race.
-        assertFalse(manager.isSaltUsed(account, cancelSalt));
+        assertFalse(manager.isAdminSaltUsed(account, cancelSalt));
 
         // The attack now lands, under exactly the requestId the veto was signed for.
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
-            recoveryId, signRecoverProof(provider, account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            recoveryId,
+            signRecoverProof(provider, address(manager), account, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
         assertEq(manager.requestRecovery(account, subject, ceremonySalt, ceremonyExpiry, approvals), requestId);
 
@@ -394,7 +467,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         manager.executeRecoveryAdmin(account, ops, cancelSalt, adminExpiry, adminOwnerBytes, proof);
 
         assertEq(manager.recoveryRequest(requestId).account, address(0));
-        assertTrue(manager.isSaltUsed(account, cancelSalt));
+        assertTrue(manager.isAdminSaltUsed(account, cancelSalt));
     }
 
     /**
@@ -431,7 +504,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         assertFalse(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
         assertEq(manager.recoveryCount(account), 0);
         assertEq(manager.recoveryThreshold(account), 1);
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
 
         // The salt really is still spendable: the same batch with the threshold corrected to a value the
         // post-ADD count supports, re-signed under the SAME salt, now applies in full.
@@ -446,7 +519,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         assertTrue(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
         assertEq(manager.recoveryCount(account), 1);
         assertEq(manager.recoveryThreshold(account), 1);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
     }
 
     /**
@@ -498,7 +571,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
         assertFalse(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
     }
 
@@ -533,7 +606,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
         assertFalse(manager.hasRecovery(account, manager.computeRecoveryId(account, address(provider), commitment)));
     }
 
@@ -608,7 +681,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         vm.prank(relayer);
         manager.executeRecoveryAdmin(account, laterOps, wrongSalt, expiry, adminOwnerBytes, laterProof);
 
-        assertTrue(manager.isSaltUsed(account, wrongSalt));
+        assertTrue(manager.isAdminSaltUsed(account, wrongSalt));
         assertTrue(manager.hasRecovery(account, secondId));
         assertEq(manager.recoveryCount(account), 2);
     }
@@ -624,8 +697,8 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
      *      and resubmit.
      * @dev Pinned precisely BECAUSE the property is emergent rather than an explicit contract check: no
      *      line in `JustaRecoveryManager` tests `account.code.length` on these paths (unlike
-     *      `executeRecoveryRequest`, which needs an explicit guard because `addOwner*` returns nothing), so
-     *      a refactor to a low-level call would silently reopen the vacuous-success hole.
+     *      `executeRecoveryRequest`, which adds an explicit guard purely for a typed error), so a refactor
+     *      to a low-level call would silently open a vacuous-success hole.
      */
     function test_ShouldRevertOnCodelessAccount(uint256 eoaGuardianPk) public {
         eoaGuardianPk = bound(eoaGuardianPk, 1, SECP256K1_CURVE_ORDER - 1);
@@ -659,7 +732,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(
             keccak256("any-recovery-id"),
-            signRecoverProof(provider, codeless, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
+            signRecoverProof(provider, address(manager), codeless, subject, ceremonySalt, ceremonyExpiry, eoaGuardianPk)
         );
 
         // Same empty-revert pin as above: the extcodesize guard carries no return data.
@@ -668,7 +741,7 @@ contract TestRecoveryAdminFlow is Test, PrepareRecovery {
         manager.requestRecovery(codeless, subject, ceremonySalt, ceremonyExpiry, approvals);
 
         // Nothing was written for the codeless account by either attempt.
-        assertFalse(manager.isSaltUsed(codeless, adminSalt));
+        assertFalse(manager.isAdminSaltUsed(codeless, adminSalt));
         assertFalse(manager.isSaltUsed(codeless, ceremonySalt));
         assertEq(manager.recoveryCount(codeless), 0);
     }

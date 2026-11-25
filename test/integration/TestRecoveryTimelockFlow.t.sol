@@ -65,7 +65,7 @@ contract TestRecoveryTimelockFlow is Test, PrepareRecovery {
         bytes32 recoveryId = manager.addRecovery(account, address(provider), encodeEoaCommitment(recoveryEoa), delay);
 
         subject = encodeEoaSubject(newOwner);
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, recoveryEoaPk);
+        bytes memory proof = signRecoverProof(provider, address(manager), account, subject, salt, expiry, recoveryEoaPk);
 
         IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
         approvals[0] = createApproval(recoveryId, proof);

@@ -8,15 +8,15 @@
 
 The manager is a non-ownable, non-upgradeable singleton (one deployment serves every account on a chain). It owns all per-account recovery state and treats recovery providers as **stateless verifiers**: on each approval it calls `provider.verify(...)`, which reverts on an invalid proof. Provider trust is therefore equivalent to provider correctness.
 
-Recovery is **multichain by design**: guardians sign one chain-agnostic ceremony, and the same proof bytes queue the recovery on every chain the account enrolled on (each chain consumes the ceremony's single-use salt independently, and the `requestId` is identical everywhere). This repository ships the canonical provider, `SignatureRecoveryProvider`, which verifies EOA guardians (strict ECDSA) and raw-pubkey passkey guardians (direct WebAuthn) against a chain-free EIP-712 digest.
+Recovery is **multichain by design**: guardians sign one chain-agnostic ceremony, and the same proof bytes queue the recovery on every chain the account enrolled on (each chain consumes the ceremony's single-use salt independently, and the `requestId` is identical everywhere). The signed message names the manager it is for, so this relies on the manager and the provider each being deployed at the same address on every chain. This repository ships the canonical provider, `SignatureRecoveryProvider`, which verifies EOA guardians (strict ECDSA) and raw-pubkey passkey guardians (direct WebAuthn) against a chain-free EIP-712 digest.
 
 ## Features
 
 - **M-of-N Threshold**: Require any `M` of an account's `N` registered recoveries to approve, defaulting to 1. Counted by distinct recovery, not by provider.
 - **Per-Recovery Time-Lock**: Each recovery carries its own delay (in seconds), set at registration. A queued request uses the **largest** delay among the approving recoveries, so a request is only as fast as its most-cautious factor.
 - **Owner-Type Agnostic**: A recovery can install a new WebAuthn passkey (64-byte `subject`) or a new EOA (32-byte `subject`); the manager dispatches on length at execution.
-- **Stateless, Pluggable Providers**: Any contract implementing `IRecoveryProvider` can serve as a factor. The manager owns the commitments, the used-salt registry, and the expiry check and passes everything in on every call, so one provider deployment backs any number of factors for any number of accounts.
-- **Sign-Once Multichain Ceremonies**: A ceremony is `(subject, salt, expiry)` signed once by each guardian over a chain-agnostic digest. Each chain's manager consumes the salt independently — single-use per chain, reusable across chains — and derives the same `requestId` everywhere.
+- **Stateless, Pluggable Providers**: Any contract implementing `IRecoveryProvider` can serve as a factor. The manager owns the commitments, the used-salt registries, and the expiry check and passes everything in on every call, so one provider deployment backs any number of factors for any number of accounts.
+- **Sign-Once Multichain Ceremonies**: A ceremony is `(subject, salt, expiry)` signed once by each guardian over a chain-agnostic digest that also binds the manager and the account. Because the manager's address is part of the signed message, one signature verifies on every chain only if the manager is at the same address on each. Each chain's manager consumes the salt independently — single-use per chain, reusable across chains — and derives the same `requestId` everywhere.
 - **Single-Use, Expiring Proofs**: The ceremony's random salt makes proofs single-use per chain; the ceremony's `expiry` (enforced by the manager at request time) bounds how long unused, leaked proofs stay usable.
 - **Two-Step Flow with Veto**: `requestRecovery` queues a request; after the delay, anyone may `executeRecoveryRequest`. During the window the account itself may `cancelRecoveryRequest` to abort.
 - **Permissionless Initiation/Execution**: The proofs carry authorization, so a relayer can request and execute on behalf of a locked-out user.
@@ -30,7 +30,7 @@ The system consists of a coordinator, a provider interface, and one concrete pro
 
 ### JustaRecoveryManager (Main Contract)
 
-The singleton coordinator that owns all per-account state (registered recoveries, approval threshold, used-salt registry) and queued recovery requests. It inherits from:
+The singleton coordinator that owns all per-account state (registered recoveries, approval threshold, used-salt registries) and queued recovery requests. It inherits from:
 
 - `IRecoveryManager` (the manager's interface — errors, events, types, and function signatures)
 - `ReentrancyGuard` (Solady's reentrancy protection)
@@ -53,11 +53,11 @@ interface IRecoveryProvider {
         uint256 expiry,
         bytes calldata commitment,
         bytes calldata proof
-    ) external;
+    ) external returns (bytes4 magicValue);
 }
 ```
 
-All implementations MUST revert on an invalid proof, bind the proof to all of `(account, subject, salt, expiry)`, and verify against exactly one `commitment` (so one proof cannot satisfy several recoveries of the same provider). Providers shipped in this repository MUST additionally be **multichain**: derive the proven message exclusively from that chain-agnostic tuple (never `block.chainid`), never route verification through a chain-binding intermediary (e.g. a third-party ERC-1271 door), and deploy deterministically at the same address on every chain. Third-party providers MAY be chain-bound; their factors are then valid on a single chain only.
+All implementations MUST revert on an invalid proof and return `IRecoveryProvider.verify.selector` on a valid one (the manager rejects any other return, so an address that is not a provider fails closed), bind the proof to all of `(manager, account, subject, salt, expiry)` where `manager` is the calling manager (`msg.sender`), and verify against exactly one `commitment` (so one proof cannot satisfy several recoveries of the same provider). Binding the manager is required because each manager tracks consumed salts on its own: a proof that does not name its manager verifies on every manager the account is enrolled on, including one with a shorter time-lock. Providers shipped in this repository MUST additionally be **multichain**: derive the proven message exclusively from that chain-agnostic tuple (never `block.chainid`), never route verification through a chain-binding intermediary (e.g. a third-party ERC-1271 door), and deploy deterministically at the same address on every chain (as must the manager, since its address is part of the signed message). Third-party providers MAY be chain-bound; their factors are then valid on a single chain only.
 
 ### SignatureRecoveryProvider (Canonical Provider)
 
@@ -117,7 +117,7 @@ struct RecoveryRequest {
 
 - **`recoveryId`** = `keccak256(abi.encode(account, provider, commitment))` — identifies a registered recovery. Account-scoped, so the same factor under two accounts yields different ids.
 - **`requestId`** = `keccak256(abi.encode(account, subject, salt))` — identifies a queued request; deterministic, single-use (the salt is consumed), and **identical on every chain** for one ceremony.
-- **`SignatureRecoveryProvider.RECOVER_TYPEHASH`** = `keccak256("Recover(address account,bytes subject,bytes32 salt,uint256 expiry)")`.
+- **`SignatureRecoveryProvider.RECOVER_TYPEHASH`** = `keccak256("Recover(address manager,address account,bytes subject,bytes32 salt,uint256 expiry)")`.
 
 ## Key Functions
 
@@ -144,6 +144,7 @@ Callable only by the account (`msg.sender == account`):
 - `recoveryCount(address account)`: Number of registered recoveries.
 - `recoveryThreshold(address account)`: The effective approval threshold (1 if never set).
 - `isSaltUsed(address account, bytes32 salt)`: Whether a ceremony's salt has been consumed on this chain.
+- `isAdminSaltUsed(address account, bytes32 salt)`: Whether a signed admin batch's salt has been consumed on this chain.
 - `recoveryRequest(bytes32 requestId)`: The pending request (zeroed if not pending).
 
 ## Security Model
@@ -193,6 +194,9 @@ mapping(address account => uint256 threshold) internal _recoveryThreshold;
 
 // Per-account registry of consumed ceremony salts
 mapping(address account => mapping(bytes32 salt => bool used)) internal _usedSalts;
+
+// Per-account registry of consumed admin-batch salts (separate, so a ceremony cannot burn a batch's salt)
+mapping(address account => mapping(bytes32 salt => bool used)) internal _usedAdminSalts;
 
 // Pending recovery requests, keyed by request id
 mapping(bytes32 requestId => RecoveryRequest request) internal _recoveryRequests;

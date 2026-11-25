@@ -52,7 +52,11 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
 
     /// @dev Stubs `verify` on `provider` to accept (return). Reachable only after the provider is etched.
     function _acceptVerify(address provider) private {
-        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), "");
+        vm.mockCall(
+            provider,
+            abi.encodeWithSelector(IRecoveryProvider.verify.selector),
+            abi.encode(IRecoveryProvider.verify.selector)
+        );
     }
 
     /// @dev Etches `account` (so the `isOwnerAddress` call's extcodesize check passes) and stubs that call to
@@ -607,7 +611,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
 
         // A signature that arrives too late changes nothing: the salt stays free, so the owner can re-sign
         // the same batch under it rather than having to pick a new one.
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_RevertIfSaltAlreadyUsed(
@@ -632,7 +636,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         bytes memory proof = signAdminProof(manager, account, ops, salt, expiry, ownerPk);
 
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
 
         // The salt is spent for the account, not just for that batch: a different, freshly signed batch
         // under the same salt is rejected before any of its ops run.
@@ -646,7 +650,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         manager.executeRecoveryAdmin(account, otherOps, salt, expiry, ownerBytes, otherProof);
     }
 
-    function test_ExecuteRecoveryAdmin_RevertIfSaltConsumedByCeremony(
+    function test_ExecuteRecoveryAdmin_ShouldSucceedIfSaltConsumedByCeremony(
         address account,
         address provider,
         address newOwner,
@@ -667,12 +671,51 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         IRecoveryManager.AdminOp[] memory ops = _oneOp(encodeSetThresholdOp(1));
         (bytes memory ownerBytes, bytes memory proof) = _signAdmin(account, ops, salt, expiry, ownerPk);
 
-        // One registry serves both doors: a salt spent by a guardian ceremony is spent for admin batches
-        // too.
-        vm.expectRevert(
-            abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_SaltAlreadyUsed.selector, account, salt)
-        );
+        // Ceremony salts and admin-batch salts are tracked separately: a salt spent by a guardian ceremony
+        // is NOT spent for admin batches. Otherwise guardians could kill an owner's pending batch (e.g. a
+        // cancel) by submitting a ceremony that reuses its publicly visible salt.
+        assertTrue(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
+
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
+
+        assertTrue(manager.isAdminSaltUsed(account, salt));
+    }
+
+    function test_RequestRecovery_ShouldSucceedIfSaltConsumedByAdminBatch(
+        address account,
+        address provider,
+        address newOwner,
+        bytes32 salt,
+        uint256 expiry,
+        uint256 ownerPk,
+        uint32 delay
+    )
+        public
+    {
+        vm.assume(expiry > block.timestamp);
+        vm.assume(newOwner != address(0));
+        ownerPk = bound(ownerPk, 1, SECP256K1_CURVE_ORDER - 1);
+
+        // The owner's admin batch lands first and spends `salt` in the admin registry.
+        _etchCode(provider);
+        _stubAccount(account, true);
+        IRecoveryManager.AdminOp[] memory ops = _oneOp(encodeAddRecoveryOp(provider, hex"01", delay));
+        (bytes memory ownerBytes, bytes memory proof) = _signAdmin(account, ops, salt, expiry, ownerPk);
+        manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
+
+        assertTrue(manager.isAdminSaltUsed(account, salt));
+        assertFalse(manager.isSaltUsed(account, salt));
+
+        // The mirror direction: a ceremony under the same salt value is unaffected.
+        bytes32 recoveryId = manager.computeRecoveryId(account, provider, hex"01");
+        _stubAccount(account, false);
+        _acceptVerify(provider);
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, "");
+        manager.requestRecovery(account, encodeEoaSubject(newOwner), salt, expiry, approvals);
+
+        assertTrue(manager.isSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_RevertIfSignerNotAccountOwner(
@@ -703,7 +746,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         );
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_RevertIfInvalidOwnerProof(
@@ -731,7 +774,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         vm.expectRevert(IRecoveryManager.JustaRecoveryManager_InvalidOwnerProof.selector);
         manager.executeRecoveryAdmin(account, ops, salt, expiry, abi.encode(vm.addr(ownerPk)), proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_RevertIfOwnerBytesMalformed(
@@ -799,7 +842,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         vm.expectRevert(abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_InvalidAdminOp.selector, opType));
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_ShouldApplyAddRecoveryOp(
@@ -977,14 +1020,14 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         ops[1] = encodeAddRecoveryOp(provider, hex"02", delay);
         (bytes memory ownerBytes, bytes memory proof) = _signAdmin(account, ops, salt, expiry, ownerPk);
 
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
 
         vm.expectEmit(true, false, false, true, address(manager));
         emit IRecoveryManager.RecoveryAdminExecuted(account, salt, ops.length);
 
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
-        assertTrue(manager.isSaltUsed(account, salt));
+        assertTrue(manager.isAdminSaltUsed(account, salt));
     }
 
     function test_ExecuteRecoveryAdmin_ShouldApplyOpsInSignedOrder(
@@ -1046,7 +1089,7 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         manager.executeRecoveryAdmin(account, ops, salt, expiry, ownerBytes, proof);
 
         assertEq(manager.recoveryCount(account), 0);
-        assertFalse(manager.isSaltUsed(account, salt));
+        assertFalse(manager.isAdminSaltUsed(account, salt));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1336,6 +1379,71 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         manager.requestRecovery(account, subject, salt, expiry, approvals);
     }
 
+    function test_RequestRecovery_RevertIfProviderReturnsWrongMagicValue(
+        address account,
+        address provider,
+        address newOwner,
+        bytes calldata commitment,
+        bytes32 salt,
+        uint256 expiry,
+        bytes4 wrongValue
+    )
+        public
+    {
+        vm.assume(commitment.length != 0);
+        vm.assume(expiry > block.timestamp);
+        vm.assume(wrongValue != IRecoveryProvider.verify.selector);
+
+        bytes32 recoveryId = _addRecovery(account, provider, commitment, 0);
+        _stubAccount(account, false);
+
+        // The provider returns without reverting, but not with the magic value: not a valid approval.
+        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), abi.encode(wrongValue));
+
+        vm.assume(newOwner != address(0));
+        bytes memory subject = encodeEoaSubject(newOwner);
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, "");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IRecoveryManager.JustaRecoveryManager_InvalidProviderResponse.selector, provider)
+        );
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
+
+        assertFalse(manager.isSaltUsed(account, salt));
+    }
+
+    function test_RequestRecovery_RevertIfProviderReturnsNothing(
+        address account,
+        address provider,
+        address newOwner,
+        bytes calldata commitment,
+        bytes32 salt,
+        uint256 expiry
+    )
+        public
+    {
+        vm.assume(commitment.length != 0);
+        vm.assume(expiry > block.timestamp);
+
+        bytes32 recoveryId = _addRecovery(account, provider, commitment, 0);
+        _stubAccount(account, false);
+
+        // A contract with a permissive fallback: the call succeeds with empty returndata. It must not
+        // count as an approval (the ABI decoder rejects the missing return value).
+        vm.mockCall(provider, abi.encodeWithSelector(IRecoveryProvider.verify.selector), "");
+
+        vm.assume(newOwner != address(0));
+        bytes memory subject = encodeEoaSubject(newOwner);
+        IRecoveryManager.Approval[] memory approvals = new IRecoveryManager.Approval[](1);
+        approvals[0] = createApproval(recoveryId, "");
+
+        vm.expectRevert();
+        manager.requestRecovery(account, subject, salt, expiry, approvals);
+
+        assertFalse(manager.isSaltUsed(account, salt));
+    }
+
     function test_RequestRecovery_ShouldUseMaxDelay(
         address account,
         address provider,
@@ -1585,9 +1693,9 @@ contract TestManagerWriteFunctions is Test, PrepareRecovery {
         vm.warp(manager.recoveryRequest(requestId).executeAt);
 
         // The account loses its code during the time-lock — an EIP-7702 delegation revoked by its key
-        // holder. The owner-add returns nothing, so without this guard the call would succeed vacuously:
-        // request deleted, success event emitted, no owner registered. Reverting keeps the request alive
-        // until the delegation is restored.
+        // holder. The owner-add could never succeed there (Solidity's code-existence check would revert it);
+        // the guard surfaces that as a typed error. Either way the request stays alive until the
+        // delegation is restored.
         vm.etch(account, "");
 
         vm.expectRevert(

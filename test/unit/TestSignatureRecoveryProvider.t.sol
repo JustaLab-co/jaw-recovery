@@ -6,6 +6,7 @@ import { Test } from "forge-std/Test.sol";
 import { P256 } from "solady/utils/P256.sol";
 
 import { PrepareRecovery } from "../../script/PrepareRecovery.s.sol";
+import { IRecoveryProvider } from "../../src/interfaces/IRecoveryProvider.sol";
 import { SignatureRecoveryProvider } from "../../src/providers/SignatureRecoveryProvider.sol";
 
 contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
@@ -39,8 +40,9 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
                 address(provider)
             )
         );
-        bytes32 structHash =
-            keccak256(abi.encode(provider.RECOVER_TYPEHASH(), account, keccak256(subject), salt, expiry));
+        bytes32 structHash = keccak256(
+            abi.encode(provider.RECOVER_TYPEHASH(), address(this), account, keccak256(subject), salt, expiry)
+        );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
@@ -50,7 +52,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
 
     function test_RecoverTypehash_ShouldMatchCanonicalString() public view {
         assertEq(
-            provider.RECOVER_TYPEHASH(), keccak256("Recover(address account,bytes subject,bytes32 salt,uint256 expiry)")
+            provider.RECOVER_TYPEHASH(),
+            keccak256("Recover(address manager,address account,bytes subject,bytes32 salt,uint256 expiry)")
         );
     }
 
@@ -71,7 +74,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // shape (name, version, verifyingContract — NO chainId) and the struct encoding. This is the one
         // property the verify tests cannot catch, since they sign the contract's own digest.
         assertEq(
-            provider.recoverDigest(account, subject, salt, expiry), _handRolledDigest(account, subject, salt, expiry)
+            provider.recoverDigest(address(this), account, subject, salt, expiry),
+            _handRolledDigest(account, subject, salt, expiry)
         );
     }
 
@@ -87,10 +91,10 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         vm.assume(chainId != 0);
 
         // The digest is byte-identical under any chainId — the property every multichain proof stands on.
-        bytes32 digestBefore = provider.recoverDigest(account, subject, salt, expiry);
+        bytes32 digestBefore = provider.recoverDigest(address(this), account, subject, salt, expiry);
 
         vm.chainId(chainId);
-        assertEq(provider.recoverDigest(account, subject, salt, expiry), digestBefore);
+        assertEq(provider.recoverDigest(address(this), account, subject, salt, expiry), digestBefore);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -149,7 +153,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // A perfectly well-formed signature over the correct ceremony digest, produced by a key that is
         // not the committed guardian: recovery succeeds but yields the wrong address, so the proof is
         // rejected. Isolates the signer mismatch — the proof bytes themselves are valid.
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, attackerPk);
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, attackerPk);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
@@ -206,7 +210,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // structurally valid signature from an unrelated key still fails. This is what keeps the sign-once
         // promise honest — a smart account's own signature door re-binds chainId, so letting one in here
         // would silently turn portable proofs into per-chain ones.
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, signerPk);
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, signerPk);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodeEoaCommitment(contractSigner), proof);
@@ -226,7 +230,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         vm.assume(expiry < type(uint256).max);
 
         bytes memory commitment = encodeEoaCommitment(vm.addr(guardianPk));
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, guardianPk);
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, guardianPk);
 
         // The proof authorizes exactly one ceremony: every field the guardian saw is bound into the
         // digest, so changing any single one of them at submission invalidates it. This is what stops a
@@ -257,12 +261,13 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         guardianPk = bound(guardianPk, 1, SECP256K1_CURVE_ORDER - 1);
 
         // The canonical EOA path: a 65-byte signature over the ceremony digest from the committed
-        // guardian. `verify` returns nothing and only ever reverts, so completing the call is the
-        // assertion. `expiry` is fuzzed without constraint on purpose — the provider binds it into the
+        // guardian. `verify` returns its magic value on success and reverts otherwise. `expiry` is fuzzed without constraint on purpose — the provider binds it into the
         // digest but never enforces the clock, which is the manager's job.
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, guardianPk);
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, guardianPk);
 
-        provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
+        bytes4 magicValue =
+            provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
+        assertEq(magicValue, IRecoveryProvider.verify.selector);
     }
 
     function test_Verify_ShouldAcceptCompactSignature(
@@ -279,7 +284,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // The 64-byte EIP-2098 compact form packs the recovery id into the top bit of `s`. Wallets emit
         // either form, and the recovery library accepts both, so the SDK can pass a guardian's signature
         // through untouched instead of normalizing it.
-        bytes memory proof = signRecoverProofCompact(provider, account, subject, salt, expiry, guardianPk);
+        bytes memory proof =
+            signRecoverProofCompact(provider, address(this), account, subject, salt, expiry, guardianPk);
 
         provider.verify(account, subject, salt, expiry, encodeEoaCommitment(vm.addr(guardianPk)), proof);
     }
@@ -295,7 +301,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
     {
         guardianPk = bound(guardianPk, 1, SECP256K1_CURVE_ORDER - 1);
 
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(guardianPk, provider.recoverDigest(account, subject, salt, expiry));
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(guardianPk, provider.recoverDigest(address(this), account, subject, salt, expiry));
 
         // Characterization, not endorsement: low-s is not enforced, so the `(r, N - s)` twin of a valid
         // signature recovers the same signer and is accepted. Harmless by design — the twin proves the
@@ -326,7 +333,7 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // Sign once, verify anywhere: the same proof bytes are accepted before and after the chain changes
         // underneath the provider. The sign-once promise, observed at the provider level.
         bytes memory commitment = encodeEoaCommitment(vm.addr(guardianPk));
-        bytes memory proof = signRecoverProof(provider, account, subject, salt, expiry, guardianPk);
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, guardianPk);
 
         provider.verify(account, subject, salt, expiry, commitment, proof);
 
@@ -353,7 +360,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // A genuine assertion from the committed key, but its challenge is the digest of a different
         // ceremony — the same field-binding guarantee the EOA branch has, carried by the WebAuthn
         // challenge instead of by ecrecover.
-        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry + 1), PASSKEY_PK);
+        bytes memory proof =
+            signWebAuthnProof(provider.recoverDigest(address(this), account, subject, salt, expiry + 1), PASSKEY_PK);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
@@ -371,7 +379,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
 
         // A genuine assertion for this ceremony, checked against a commitment holding a different key:
         // P-256 verification fails, so one guardian's passkey can never satisfy another's factor.
-        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
+        bytes memory proof =
+            signWebAuthnProof(provider.recoverDigest(address(this), account, subject, salt, expiry), PASSKEY_PK);
 
         vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
         provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y + 1)), proof);
@@ -408,9 +417,12 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
         // verified straight against the committed key. The guardian's own account contract is never
         // consulted, which is what makes undeployed passkey guardians work with no ERC-6492 machinery and
         // keeps the proof free of any chain binding.
-        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
+        bytes memory proof =
+            signWebAuthnProof(provider.recoverDigest(address(this), account, subject, salt, expiry), PASSKEY_PK);
 
-        provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
+        bytes4 magicValue =
+            provider.verify(account, subject, salt, expiry, encodePasskeyCommitment(bytes32(x), bytes32(y)), proof);
+        assertEq(magicValue, IRecoveryProvider.verify.selector);
     }
 
     function test_Verify_ShouldAcceptPasskeyProofUnderDifferentChainIds(
@@ -427,7 +439,8 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
 
         // Sign once, verify anywhere — the passkey half of the multichain promise.
         bytes memory commitment = encodePasskeyCommitment(bytes32(x), bytes32(y));
-        bytes memory proof = signWebAuthnProof(provider.recoverDigest(account, subject, salt, expiry), PASSKEY_PK);
+        bytes memory proof =
+            signWebAuthnProof(provider.recoverDigest(address(this), account, subject, salt, expiry), PASSKEY_PK);
 
         provider.verify(account, subject, salt, expiry, commitment, proof);
 
@@ -507,13 +520,84 @@ contract TestSignatureRecoveryProvider is Test, PrepareRecovery {
                 DOMAIN_TYPEHASH_SANS_CHAIN_ID, keccak256(bytes(name)), keccak256(bytes(version)), verifyingContract
             )
         );
-        bytes32 structHash =
-            keccak256(abi.encode(provider.RECOVER_TYPEHASH(), account, keccak256(subject), salt, expiry));
+        bytes32 structHash = keccak256(
+            abi.encode(provider.RECOVER_TYPEHASH(), address(this), account, keccak256(subject), salt, expiry)
+        );
 
         assertEq(
             keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash)),
-            provider.recoverDigest(account, subject, salt, expiry)
+            provider.recoverDigest(address(this), account, subject, salt, expiry)
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        MANAGER BINDING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_RecoverDigest_ShouldDifferPerManager(
+        address managerA,
+        address managerB,
+        address account,
+        bytes calldata subject,
+        bytes32 salt,
+        uint256 expiry
+    )
+        public
+        view
+    {
+        vm.assume(managerA != managerB);
+
+        // The manager is part of the signed message, so the same ceremony for two managers is two digests.
+        assertNotEq(
+            provider.recoverDigest(managerA, account, subject, salt, expiry),
+            provider.recoverDigest(managerB, account, subject, salt, expiry)
+        );
+    }
+
+    function test_Verify_RevertIfCalledByAnotherManager(
+        address otherManager,
+        address account,
+        bytes calldata subject,
+        bytes32 salt,
+        uint256 expiry,
+        uint256 guardianPk
+    )
+        public
+    {
+        vm.assume(otherManager != address(this));
+        guardianPk = bound(guardianPk, 1, SECP256K1_CURVE_ORDER - 1);
+        bytes memory commitment = encodeEoaCommitment(vm.addr(guardianPk));
+
+        // A genuine guardian signature for the ceremony on THIS manager (the test contract is the caller).
+        bytes memory proof = signRecoverProof(provider, address(this), account, subject, salt, expiry, guardianPk);
+        provider.verify(account, subject, salt, expiry, commitment, proof);
+
+        // The same bytes presented by a different manager do not verify: `verify` binds `msg.sender`.
+        vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
+        vm.prank(otherManager);
+        provider.verify(account, subject, salt, expiry, commitment, proof);
+    }
+
+    function test_Verify_PasskeyRevertIfCalledByAnotherManager(
+        address otherManager,
+        address account,
+        bytes calldata subject,
+        bytes32 salt,
+        uint256 expiry
+    )
+        public
+    {
+        vm.assume(otherManager != address(this));
+        (uint256 x, uint256 y) = vm.publicKeyP256(PASSKEY_PK);
+        bytes memory commitment = encodePasskeyCommitment(bytes32(x), bytes32(y));
+
+        bytes memory proof =
+            signWebAuthnProof(provider.recoverDigest(address(this), account, subject, salt, expiry), PASSKEY_PK);
+        provider.verify(account, subject, salt, expiry, commitment, proof);
+
+        vm.expectRevert(SignatureRecoveryProvider.SignatureRecoveryProvider_InvalidSignature.selector);
+        vm.prank(otherManager);
+        provider.verify(account, subject, salt, expiry, commitment, proof);
     }
 
 }
